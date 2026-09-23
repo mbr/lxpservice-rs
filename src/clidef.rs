@@ -1,145 +1,203 @@
-//! Parses command-line operations.
+//! Parses typed operations and explicit submission intent.
 
-use std::path::PathBuf;
+use std::{
+    num::{NonZeroU32, NonZeroU64},
+    path::PathBuf,
+};
 
 use clap::{Args, Parser, Subcommand};
 
-/// Selects a client operation.
+use crate::lxptypes::{ApiMode, Color, JobFilter, Shipping, Sides, Specification};
+
+/// Selects an authenticated client operation.
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
     /// Increases diagnostic verbosity.
-    #[arg(short, long, action = clap::ArgAction::Count)]
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+    /// Identifies the LetterXpress account.
+    #[arg(long, env = "LXP_USERNAME", global = true, hide_env_values = true)]
+    pub username: Option<String>,
+    /// Authenticates the account; prefer the environment over command-line arguments.
+    #[arg(long, env = "LXP_API_KEY", global = true, hide_env_values = true)]
+    pub api_key: Option<String>,
+    /// Chooses test shopping-cart uploads or paid live processing.
+    #[arg(
+        long,
+        env = "LXP_MODE",
+        global = true,
+        value_enum,
+        default_value = "test"
+    )]
+    pub mode: ApiMode,
     /// Chooses the operation to perform.
     #[command(subcommand)]
     pub command: Command,
 }
 
-/// Defines supported client operations.
+/// Defines client operations.
 #[derive(Subcommand)]
 pub enum Command {
-    /// Creates and maintains profiles.
-    Profile(Profile),
-    /// Retrieves invoices.
-    Invoice(Invoice),
-    /// Inspects or deletes print jobs.
-    Job(Job),
-    /// Submits PDF files.
-    Set(Send),
-    /// Watches a directory for PDF files.
+    /// Shows available account credit.
+    Balance,
+    /// Estimates a price without uploading a document.
+    Price {
+        /// Gives the document page count.
+        #[arg(long)]
+        pages: NonZeroU32,
+        /// Selects print and delivery options.
+        #[command(flatten)]
+        print: PrintOptions,
+    },
+    /// Lists one page of jobs; done means processed, not delivered.
+    Jobs {
+        /// Filters processing state.
+        #[arg(long, value_enum)]
+        filter: Option<JobFilter>,
+        /// Selects the result page.
+        #[arg(long, default_value = "1")]
+        page: NonZeroU32,
+    },
+    /// Retrieves a job and its tracking information.
+    Status {
+        /// Identifies the print job.
+        id: NonZeroU64,
+    },
+    /// Cancels a job within the provider's cancellation window.
+    Cancel {
+        /// Identifies the print job.
+        id: NonZeroU64,
+    },
+    /// Submits a PDF or a directory of PDFs once, defaulting to test mode.
+    #[command(alias = "set")]
+    Send(Send),
+    /// Watches completed PDF writes; stops on an unconfirmed submission.
     WatchDir(Send),
+    /// Retrieves invoice metadata and PDFs.
+    Invoice {
+        /// Selects the invoice operation.
+        #[command(subcommand)]
+        command: InvoiceCommand,
+    },
+    /// Maintains legacy local profiles, separate from environment credentials.
+    Profile {
+        /// Selects profile maintenance.
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
 }
 
-/// Selects profile maintenance actions.
+/// Selects invoice retrieval operations.
+#[derive(Subcommand)]
+pub enum InvoiceCommand {
+    /// Lists a page of invoices.
+    List {
+        /// Selects the result page.
+        #[arg(long, default_value = "1")]
+        page: NonZeroU32,
+    },
+    /// Downloads a PDF without overwriting an existing file.
+    Get {
+        /// Identifies the invoice.
+        id: NonZeroU64,
+        /// Locates the new PDF file.
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+
+/// Selects profile maintenance operations.
+#[derive(Subcommand)]
+pub enum ProfileCommand {
+    /// Lists configured profiles without exposing keys.
+    List,
+    /// Saves environment credentials as a private local profile.
+    Save {
+        /// Names the profile.
+        name: String,
+    },
+    /// Selects a stored profile.
+    Select {
+        /// Names the profile.
+        name: String,
+    },
+    /// Deletes a stored profile.
+    Delete {
+        /// Names the profile.
+        name: String,
+    },
+}
+
+/// Selects printing independently of submission mode.
 #[derive(Args)]
-#[group(required = true, multiple = false, args = ["new", "delete", "delete_all", "switch", "overview"])]
-pub struct Profile {
-    /// Creates and selects a profile.
-    #[arg(short, long, requires_all = ["profile", "user", "url", "api_key"])]
-    pub new: bool,
-    /// Deletes a profile.
-    #[arg(short, long, requires = "profile")]
-    pub delete: bool,
-    /// Deletes every profile.
-    #[arg(short = 'a', long = "delete_all")]
-    pub delete_all: bool,
-    /// Selects a profile.
-    #[arg(short, long, requires = "profile")]
-    pub switch: bool,
-    /// Lists profiles.
-    #[arg(short, long)]
-    pub overview: bool,
-    /// Supplies positional profile data.
-    #[command(flatten)]
-    pub data: ProfileData,
+pub struct PrintOptions {
+    /// Selects ink usage.
+    #[arg(long, value_enum, default_value = "bw")]
+    pub color: Color,
+    /// Prints both sides of each sheet.
+    #[arg(long)]
+    pub duplex: bool,
+    /// Selects the delivery region.
+    #[arg(long, value_enum, default_value = "national")]
+    pub shipping: Shipping,
 }
 
-/// Supplies profile connection information.
-#[derive(Args)]
-#[group(skip)]
-pub struct ProfileData {
-    /// Names the profile.
-    pub profile: Option<String>,
-    /// Identifies the account.
-    pub user: Option<String>,
-    /// Sets the service URL.
-    pub url: Option<String>,
-    /// Authenticates the account.
-    pub api_key: Option<String>,
+impl From<&PrintOptions> for Specification {
+    fn from(print: &PrintOptions) -> Self {
+        Self {
+            color: print.color,
+            mode: if print.duplex {
+                Sides::Duplex
+            } else {
+                Sides::Simplex
+            },
+            shipping: print.shipping,
+            pages: None,
+        }
+    }
 }
 
-/// Selects an invoice operation.
-#[derive(Args)]
-#[group(required = true, multiple = false)]
-pub struct Invoice {
-    /// Retrieves an invoice by identifier.
-    #[arg(short, long)]
-    pub id: Option<i32>,
-    /// Retrieves the latest invoice.
-    #[arg(short, long)]
-    pub current: bool,
-    /// Lists invoices.
-    #[arg(short, long)]
-    pub list: bool,
-}
-
-/// Selects job operations.
-#[derive(Args)]
-pub struct Job {
-    /// Enables cancellation.
-    #[arg(short, long, requires = "selection", conflicts_with = "overview")]
-    pub delete: bool,
-    /// Cancels all pending jobs.
-    #[arg(short, long, requires = "delete", group = "selection")]
-    pub all: bool,
-    /// Cancels a single job.
-    #[arg(short, long, requires = "delete", group = "selection")]
-    pub id: Option<i32>,
-    /// Lists jobs.
-    #[arg(short, long, required_unless_present = "delete")]
-    pub overview: bool,
-}
-
-/// Selects documents and print options.
+/// Selects documents and acknowledges paid submission when applicable.
 #[derive(Args)]
 pub struct Send {
-    /// Locates the PDF file or directory.
+    /// Locates the addressed PDF or directory.
     pub path: PathBuf,
-    /// Prints in black and white.
-    #[arg(short, long = "black_and_white")]
-    pub black_and_white: bool,
-    /// Sends internationally.
-    #[arg(short, long)]
-    pub international: bool,
-    /// Prints on both sides.
-    #[arg(short, long)]
-    pub duplex: bool,
+    /// Selects print options.
+    #[command(flatten)]
+    pub print: PrintOptions,
+    /// Confirms paid submission when the effective mode is live.
+    #[arg(long)]
+    pub yes: bool,
+    /// Supplies a correlation reference, not an idempotency key.
+    #[arg(long)]
+    pub notice: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use super::{Cli, Command};
+    use crate::lxptypes::{ApiMode, Shipping, Sides, Specification};
 
-    /// Validates command constraints without running operations.
+    /// Validates mode precedence, positive identifiers and independent print flags.
     #[test]
-    fn command_constraints() {
+    fn command_contract() {
         Cli::command().debug_assert();
-        assert!(Cli::try_parse_from([
-            "lxp",
-            "profile",
-            "--new",
-            "home",
-            "user",
-            "https://example.com/",
-            "key"
-        ])
-        .is_ok());
-        assert!(Cli::try_parse_from(["lxp", "profile", "--new", "home"]).is_err());
-        assert!(Cli::try_parse_from(["lxp", "job", "--delete"]).is_err());
-        assert!(Cli::try_parse_from(["lxp", "job", "--delete", "--all", "--id", "1"]).is_err());
-        assert!(Cli::try_parse_from(["lxp", "set", "letter.pdf", "--duplex"]).is_ok());
+        let cli = Cli::try_parse_from(["lxp", "--mode", "test", "send", "letter.pdf", "--duplex"])
+            .expect("valid command");
+        assert_eq!(cli.mode, ApiMode::Test);
+        if let Command::Send(send) = cli.command {
+            let specification = Specification::from(&send.print);
+            assert!(matches!(specification.mode, Sides::Duplex));
+            assert!(matches!(specification.shipping, Shipping::National));
+            assert!(!send.yes);
+        } else {
+            panic!("expected send command");
+        }
+        assert!(Cli::try_parse_from(["lxp", "status", "0"]).is_err());
+        assert!(Cli::try_parse_from(["lxp", "price", "--pages", "0"]).is_err());
+        assert!(Cli::try_parse_from(["lxp", "--mode", "live", "send", "letter.pdf"]).is_ok());
     }
 }

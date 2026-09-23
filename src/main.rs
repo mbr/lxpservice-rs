@@ -1,4 +1,4 @@
-//! Runs the LetterXpress command-line client.
+//! Runs explicit LetterXpress operations with nonzero failure exit codes.
 
 mod clidef;
 mod logger;
@@ -7,124 +7,78 @@ mod lxpcommands;
 mod lxpconfig;
 mod lxptypes;
 
+use std::process::ExitCode;
+
 use clap::Parser;
 
-use crate::clidef::{Cli, Command};
+use crate::{
+    clidef::{Cli, Command, ProfileCommand},
+    lxpapi::LxpApi,
+    lxpcommands::Error,
+    lxpconfig::LxpConfig,
+};
 
-/// Dispatches parsed operations.
+/// Runs the selected command without printing credentials or server bodies on failure.
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let log_dir = std::env::current_dir().expect("current directory is available");
-    let config_dir = if matches!(cli.command, Command::WatchDir(_)) {
-        std::path::PathBuf::from("/etc/lxp")
-    } else {
-        dirs::config_dir()
-            .expect("configuration directory is available")
-            .join("lxp")
-    };
+    match run(cli).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Resolves credentials and dispatches local or remote operations.
+async fn run(cli: Cli) -> Result<(), Error> {
+    let config_dir = dirs::config_dir().ok_or(Error::Credentials)?.join("lxp");
+    let log_dir = std::env::current_dir().map_err(Error::Io)?;
     logger::init("lxp", &log_dir, u64::from(cli.verbose));
-    let mut commands = lxpcommands::LxpCommands::new(&config_dir);
-    match cli.command {
-        Command::Profile(profile) => {
-            let data = profile.data;
-            if profile.new {
-                commands.profile_new(
-                    data.profile.as_deref().expect("clap requires profile"),
-                    data.user.as_deref().expect("clap requires user"),
-                    data.url.as_deref().expect("clap requires url"),
-                    data.api_key.as_deref().expect("clap requires key"),
+    if let Command::Profile { command } = cli.command {
+        let mut config = LxpConfig::new(&config_dir);
+        match command {
+            ProfileCommand::List => config.show_profiles(),
+            ProfileCommand::Save { name } => {
+                let (username, apikey) = credentials(cli.username, cli.api_key, None)?;
+                config.new_profile(
+                    &name,
+                    lxpconfig::Profile {
+                        user_name: username,
+                        api_key: apikey,
+                        url: "https://api.letterxpress.de/v3/".into(),
+                    },
                 );
-            } else if profile.delete {
-                commands.profile_delete(data.profile.as_deref().expect("clap requires profile"));
-            } else if profile.delete_all {
-                commands.profile_delete_all();
-            } else if profile.switch {
-                commands.profile_switch(data.profile.as_deref().expect("clap requires profile"));
-            } else {
-                commands.profile_show();
             }
+            ProfileCommand::Select { name } => config.switch_profile(&name),
+            ProfileCommand::Delete { name } => config.delete_profile(&name),
         }
-        Command::Invoice(invoice) => {
-            if let Some(id) = invoice.id {
-                commands.invoice_get_by_id(&id.to_string()).await;
-            } else if invoice.current {
-                commands.invoice_get_last().await;
-            } else {
-                commands.invoice_list().await;
-            }
-        }
-        Command::Job(job) => {
-            if let Some(id) = job.id {
-                commands.job_delete_by_id(&id.to_string()).await;
-            } else if job.all {
-                commands.job_delete_all().await;
-            } else {
-                commands.job_overview().await;
-            }
-        }
-        Command::Set(send) => {
-            let (color, mode, ship) = print_options(&send);
-            commands
-                .job_set_file_or_dir(&send.path.to_string_lossy(), color, mode, ship)
-                .await;
-        }
-        Command::WatchDir(send) => {
-            let (color, mode, ship) = print_options(&send);
-            commands.watch_dir(&send.path, color, mode, ship).await;
-        }
+        return Ok(());
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::print_options;
-    use crate::{
-        clidef::Send,
-        lxptypes::{Mode, Ship},
+    let profile = if cli.username.is_none() && cli.api_key.is_none() {
+        LxpConfig::new(&config_dir).get_active_profile()
+    } else {
+        None
     };
-
-    /// Keeps duplex and international flags independent.
-    #[test]
-    fn independent_print_flags() {
-        let mut send = Send {
-            path: PathBuf::from("test.pdf"),
-            black_and_white: true,
-            international: false,
-            duplex: true,
-        };
-        assert!(matches!(
-            print_options(&send),
-            (_, Mode::Duplex, Ship::National)
-        ));
-        send.duplex = false;
-        send.international = true;
-        assert!(matches!(
-            print_options(&send),
-            (_, Mode::Simplex, Ship::International)
-        ));
-    }
+    let (username, apikey) = credentials(cli.username, cli.api_key, profile)?;
+    let api = LxpApi::new(username, apikey, cli.mode).map_err(Error::Api)?;
+    lxpcommands::run(&api, cli.command).await
 }
 
-/// Converts print flags into API options.
-fn print_options(send: &clidef::Send) -> (lxptypes::ColorPrint, lxptypes::Mode, lxptypes::Ship) {
-    (
-        if send.black_and_white {
-            lxptypes::ColorPrint::BlackAndWhite
-        } else {
-            lxptypes::ColorPrint::Color
-        },
-        if send.duplex {
-            lxptypes::Mode::Duplex
-        } else {
-            lxptypes::Mode::Simplex
-        },
-        if send.international {
-            lxptypes::Ship::International
-        } else {
-            lxptypes::Ship::National
-        },
-    )
+/// Resolves one complete credential source without mixing accounts.
+fn credentials(
+    username: Option<String>,
+    apikey: Option<String>,
+    profile: Option<lxpconfig::Profile>,
+) -> Result<(String, String), Error> {
+    let pair = match (username, apikey, profile) {
+        (Some(username), Some(apikey), _) => (username, apikey),
+        (None, None, Some(profile)) => (profile.user_name, profile.api_key),
+        _ => return Err(Error::Credentials),
+    };
+    if pair.0.trim().is_empty() || pair.1.trim().is_empty() {
+        return Err(Error::Credentials);
+    }
+    Ok(pair)
 }

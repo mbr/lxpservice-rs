@@ -1,385 +1,217 @@
-use std::{fs, io::Write, path::PathBuf};
+//! Executes explicit client operations and bounded document submissions.
 
-use futures::{stream, StreamExt};
-use log::{debug, error, info, trace};
+use std::{collections::HashSet, path::Path};
+
+use base64::{engine::general_purpose::STANDARD, Engine};
 use notify::{
     event::{AccessKind, AccessMode, ModifyKind, RenameMode},
-    recommended_watcher, EventKind, RecursiveMode, Watcher,
+    EventKind, RecursiveMode, Watcher,
 };
-use tokio::sync::mpsc::unbounded_channel;
+use serde::Serialize;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::mpsc::unbounded_channel,
+};
 
-use crate::{lxpapi, lxpconfig, lxptypes};
+use crate::{
+    clidef::{Command, InvoiceCommand, Send},
+    lxpapi::{self, LxpApi},
+    lxptypes::{DocumentError, Letter, PrintJob, Specification, MAX_PDF_BYTES},
+};
 
-#[derive(Debug, Clone)]
-pub struct LxpCommands {
-    config: lxpconfig::LxpConfig,
-    api_ref: Option<lxpapi::LxpApi>,
+/// Describes command failures without relying on logging side effects.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// Reports a service failure.
+    #[error("{0}")]
+    Api(#[source] lxpapi::Error),
+    /// Reports invalid document input.
+    #[error("{0}")]
+    Document(#[source] DocumentError),
+    /// Reports a filesystem failure.
+    #[error("filesystem operation failed")]
+    Io(#[source] std::io::Error),
+    /// Reports invalid or incomplete credentials.
+    #[error("set both LXP_USERNAME and LXP_API_KEY, or select a local profile")]
+    Credentials,
+    /// Rejects invalid input paths.
+    #[error("expected a regular PDF file or directory")]
+    InvalidPath,
+    /// Reports malformed invoice contents.
+    #[error("invoice PDF data is missing or invalid")]
+    InvalidInvoice,
+    /// Reports output serialization failure.
+    #[error("could not encode command output")]
+    Json(#[source] serde_json::Error),
+    /// Reports filesystem watch failure.
+    #[error("filesystem watcher failed")]
+    Watch(#[source] notify::Error),
+    /// Avoids resubmitting a path after an earlier watcher attempt.
+    #[error(
+        "path has already been submitted in this watcher session; inspect jobs before restarting"
+    )]
+    RepeatedPath,
 }
 
-impl LxpCommands {
-    pub fn new(config_dir: &PathBuf) -> LxpCommands {
-        let config = lxpconfig::LxpConfig::new(config_dir);
-        LxpCommands {
-            config,
-            api_ref: None,
+/// Runs a parsed API operation and prints structured results to stdout.
+pub async fn run(api: &LxpApi, command: Command) -> Result<(), Error> {
+    match command {
+        Command::Balance => output(&api.balance().await.map_err(Error::Api)?),
+        Command::Price { pages, print } => {
+            let mut specification = Specification::from(&print);
+            specification.pages = Some(pages.get());
+            output(&api.price(specification).await.map_err(Error::Api)?)
         }
-    }
-
-    fn api(&mut self) -> lxpapi::LxpApi {
-        match &self.api_ref {
-            Some(_api) => (),
-            None => {
-                // Get profile and instanciate api
-                let profile = self.config.get_active_profile().unwrap();
-                self.api_ref = Some(lxpapi::LxpApi::new(
-                    &profile.user_name,
-                    &profile.api_key,
-                    &profile.url,
-                ))
-            }
-        };
-        self.api_ref.clone().unwrap()
-    }
-
-    pub fn profile_new(&mut self, profile_name: &str, user_name: &str, url: &str, api_key: &str) {
-        info!(
-            "New profile {}, user '{}', url '{}' and <api_key>",
-            profile_name, user_name, url
-        );
-        info!("Active profile is set to '{}'", profile_name);
-        let profile = lxpconfig::Profile {
-            user_name: user_name.into(),
-            url: url.into(),
-            api_key: api_key.into(),
-        };
-        self.config.new_profile(profile_name, profile);
-    }
-
-    pub fn profile_delete(&mut self, profile_name: &str) {
-        self.config.delete_profile(profile_name);
-    }
-
-    pub fn profile_delete_all(&mut self) {
-        self.config.delete_all_profiles();
-    }
-
-    pub fn profile_switch(&mut self, profile_name: &str) {
-        self.config.switch_profile(profile_name);
-    }
-
-    pub fn profile_show(&mut self) {
-        self.config.show_profiles();
-    }
-
-    fn _invoice_write_pdf_file(&self, r: lxptypes::Response, pdf_file: Vec<u8>) {
-        let profile_name = self.config.get_active_profile_name().unwrap();
-        match &r.invoice {
-            Some(invoice) => {
-                let file_name: String =
-                    format!("{}_{}-invoice.pdf", invoice.invoicedate, &profile_name);
-                info!("Writing file '{}'", file_name);
-                let mut buffer = fs::File::create(file_name).expect("Could not create PDF file");
-                buffer
-                    .write_all(&pdf_file)
-                    .expect("Could not write PDF file");
-            }
-            None => error!("<No data>"),
+        Command::Jobs { filter, page } => {
+            output(&api.jobs(filter, page.get()).await.map_err(Error::Api)?)
         }
-    }
-
-    pub async fn invoice_list(&mut self) {
-        match self.api().list_invoices().await {
-            Ok(r) => match &r.invoices {
-                Some(invoices) => {
-                    info!("\n{:<10} {:>6} {:>8}", "Date", "Id", "Cost");
-                    for (_key, invoice) in invoices {
-                        let cost = invoice.sum.parse::<f64>().unwrap()
-                            + invoice.vat.parse::<f64>().unwrap();
-                        info!(
-                            "{:<10} {:>6} {:>6.2} €",
-                            &invoice.invoicedate, &invoice.iid, &cost,
-                        )
-                    }
+        Command::Status { id } => output(&api.job(id).await.map_err(Error::Api)?),
+        Command::Cancel { id } => {
+            api.cancel(id).await.map_err(Error::Api)?;
+            println!("Canceled job {id}");
+            Ok(())
+        }
+        Command::Send(send) => send_path(api, &send).await,
+        Command::WatchDir(send) => watch(api, &send).await,
+        Command::Invoice { command } => match command {
+            InvoiceCommand::List { page } => {
+                output(&api.invoices(page.get()).await.map_err(Error::Api)?)
+            }
+            InvoiceCommand::Get { id, output } => {
+                let invoice = api.invoice(id).await.map_err(Error::Api)?;
+                let encoded = invoice.base64_data.ok_or(Error::InvalidInvoice)?;
+                let pdf = STANDARD
+                    .decode(encoded)
+                    .map_err(|_| Error::InvalidInvoice)?;
+                if !pdf.starts_with(b"%PDF-") {
+                    return Err(Error::InvalidInvoice);
                 }
-                None => info!("<No data>"),
-            },
-            Err(e) => error!("Error when getting invoice list {}", e),
+                let mut options = tokio::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                options.mode(0o600);
+                let mut file = options.open(output).await.map_err(Error::Io)?;
+                file.write_all(&pdf).await.map_err(Error::Io)?;
+                file.sync_all().await.map_err(Error::Io)
+            }
+        },
+        Command::Profile { .. } => unreachable!("profiles are handled before API construction"),
+    }
+}
+
+/// Prints a typed response without using diagnostics as the data channel.
+fn output<T: Serialize>(value: &T) -> Result<(), Error> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).map_err(Error::Json)?
+    );
+    Ok(())
+}
+
+/// Submits directory entries sequentially and stops on the first unconfirmed job.
+async fn send_path(api: &LxpApi, send: &Send) -> Result<(), Error> {
+    let metadata = tokio::fs::symlink_metadata(&send.path)
+        .await
+        .map_err(Error::Io)?;
+    if metadata.is_file() {
+        return output(&send_one(api, send, &send.path).await?);
+    }
+    if !metadata.is_dir() {
+        return Err(Error::InvalidPath);
+    }
+    let mut entries = tokio::fs::read_dir(&send.path).await.map_err(Error::Io)?;
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(Error::Io)? {
+        if entry.file_type().await.map_err(Error::Io)?.is_file() && is_pdf(&entry.path()) {
+            paths.push(entry.path());
         }
     }
+    paths.sort();
+    if paths.is_empty() {
+        return Err(Error::InvalidPath);
+    }
+    for path in paths {
+        output(&send_one(api, send, &path).await?)?;
+    }
+    Ok(())
+}
 
-    pub async fn invoice_get_last(&mut self) {
-        match self.api().get_last_invoice().await {
-            Ok(r) => self._invoice_write_pdf_file(r.0, r.1),
-            Err(e) => error!("Error when getting invoice {}", e),
+/// Reads a bounded PDF and makes exactly one application-level upload attempt.
+async fn send_one(api: &LxpApi, send: &Send, path: &Path) -> Result<PrintJob, Error> {
+    if !is_pdf(path)
+        || !tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(Error::Io)?
+            .is_file()
+    {
+        return Err(Error::InvalidPath);
+    }
+    let file = tokio::fs::File::open(path).await.map_err(Error::Io)?;
+    let mut pdf = Vec::new();
+    file.take(MAX_PDF_BYTES as u64 + 1)
+        .read_to_end(&mut pdf)
+        .await
+        .map_err(Error::Io)?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(Error::InvalidPath)?
+        .to_owned();
+    let letter = Letter::from_pdf(
+        &pdf,
+        filename,
+        Specification::from(&send.print),
+        send.notice.clone(),
+    )
+    .map_err(Error::Document)?;
+    api.send(letter, send.yes).await.map_err(Error::Api)
+}
+
+/// Checks the filename extension without assuming UTF-8 paths.
+fn is_pdf(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+}
+
+/// Watches completed writes and archives only confirmed submissions.
+async fn watch(api: &LxpApi, send: &Send) -> Result<(), Error> {
+    tokio::fs::create_dir_all(send.path.join("sent"))
+        .await
+        .map_err(Error::Io)?;
+    let (tx, mut rx) = unbounded_channel();
+    let mut watcher = notify::recommended_watcher(move |event| {
+        let _ = tx.send(event);
+    })
+    .map_err(Error::Watch)?;
+    watcher
+        .watch(&send.path, RecursiveMode::NonRecursive)
+        .map_err(Error::Watch)?;
+    let mut attempted = HashSet::new();
+    while let Some(event) = rx.recv().await {
+        let event = event.map_err(Error::Watch)?;
+        if !matches!(
+            event.kind,
+            EventKind::Access(AccessKind::Close(AccessMode::Write))
+                | EventKind::Modify(ModifyKind::Name(RenameMode::To))
+        ) {
+            continue;
+        }
+        for path in event.paths {
+            if !is_pdf(&path) || !path.exists() {
+                continue;
+            }
+            if !attempted.insert(path.clone()) {
+                return Err(Error::RepeatedPath);
+            }
+            let job = send_one(api, send, &path).await?;
+            output(&job)?;
+            let filename = path.file_name().ok_or(Error::InvalidPath)?;
+            let destination = send.path.join("sent").join(filename);
+            tokio::fs::hard_link(&path, destination)
+                .await
+                .map_err(Error::Io)?;
+            tokio::fs::remove_file(path).await.map_err(Error::Io)?;
         }
     }
-
-    pub async fn invoice_get_by_id(&mut self, id: &str) {
-        match id.parse::<i32>() {
-            Ok(id) => {
-                debug!("Storing invoice, ID: {}", id);
-                match self.api().get_invoice(id).await {
-                    Ok(r) => self._invoice_write_pdf_file(r.0, r.1),
-                    Err(e) => error!("Error when getting invoice {}", e),
-                }
-            }
-            Err(e) => {
-                error!("Invoice id must be Integer: Error Message '{}'", e);
-            }
-        }
-    }
-
-    fn _job_show_list(&self, r: lxptypes::Response) {
-        match &r.jobs {
-            Some(jobs) => {
-                let mut sum_cost: f64 = 0.0;
-                info!(
-                    "\n{:<10} {:>8} {:>3} {:>3} {:>3} {:>3} {:>4} {:<35}",
-                    "Date", "Id", "Pgs", "Col", "Dpx", "Shp", "Cost", "Filename"
-                );
-                for (_key, job) in jobs {
-                    let cost =
-                        job.cost.parse::<f64>().unwrap() + job.cost_vat.parse::<f64>().unwrap();
-                    sum_cost += cost;
-                    info!(
-                        "{:<10} {:>8} {:>3} {:>3} {:>3} {:>3} {:>4.2} {:<35}",
-                        &job.date[..10],
-                        &job.jid,
-                        &job.pages,
-                        &job.color,
-                        &job.mode[..3],
-                        &job.shipping[..3],
-                        &cost,
-                        &job.address
-                    )
-                }
-                info!("The sum of the costs is {:.2} €", sum_cost)
-            }
-            None => info!("<No data>"),
-        }
-    }
-
-    async fn _job_show_lists(&mut self) -> Result<(), lxpapi::LxpApiError> {
-        let r = self.api().get_blance().await?;
-        info!("Credit balance {} €", r.balance.unwrap().value);
-
-        debug!("Check the status of the placed print jobs");
-        let r = self.api().get_jobs_queue(7).await?;
-        info!("\nThese letters will be sent soon:");
-        self._job_show_list(r);
-
-        let r = self.api().get_jobs_hold().await?;
-        info!("\nThese letters are in the queue (credit exhausted):");
-        self._job_show_list(r);
-
-        let r = self.api().get_jobs_sent(7).await?;
-        info!("\nThese letters are sent in the last 7 days:");
-        self._job_show_list(r);
-        Ok(())
-    }
-
-    pub async fn job_overview(&mut self) {
-        info!(
-            "Active profile '{}'",
-            match self.config.get_active_profile_name() {
-                Some(user) => user,
-                None => String::from("<No active profile>"),
-            }
-        );
-
-        match self._job_show_lists().await {
-            Ok(()) => (),
-            Err(e) => error!("Error in rest service {}", e),
-        }
-    }
-
-    async fn _job_delete_by_id(&mut self, id: i32, file_name: &str) {
-        match self.api().delete_job(id).await {
-            Ok(r) => match r.status {
-                200 => info!("  Job id {} {} deleted", id, file_name),
-                404 => error!("Job Id {} not found", id),
-                _ => error!("Don't know what to do with status {}", r.status),
-            },
-            Err(e) => error!("Error in server connection {}", e),
-        }
-    }
-
-    async fn _jobs_delete_list(&mut self, r: lxptypes::Response) -> i32 {
-        let mut jobs_deleted: i32 = 0;
-        match &r.jobs {
-            Some(jobs) => {
-                for (_key, job) in jobs {
-                    let id = job
-                        .jid
-                        .parse::<i32>()
-                        .expect("Job id must be integer, error in JSON string");
-                    self._job_delete_by_id(id, &job.address).await;
-                    jobs_deleted += 1;
-                }
-            }
-            None => (),
-        }
-        jobs_deleted
-    }
-
-    pub async fn job_delete_all(&mut self) {
-        let mut jobs_deleted: i32 = match self.api().get_jobs_queue(7).await {
-            Ok(r) => self._jobs_delete_list(r).await,
-            Err(e) => {
-                error!("{}", e);
-                0
-            }
-        };
-
-        jobs_deleted += match self.api().get_jobs_hold().await {
-            Ok(r) => self._jobs_delete_list(r).await,
-            Err(e) => {
-                error!("{}", e);
-                0
-            }
-        };
-        info!("{} job(s) deleted", jobs_deleted)
-    }
-
-    pub async fn job_delete_by_id(&mut self, id_arg: &str) {
-        let id = match id_arg.parse::<i32>() {
-            Ok(id) => {
-                debug!("Deleting a single print job on server, ID: {}", id);
-                id
-            }
-            Err(e) => {
-                error!("Deleting id must be Integer: Error Message '{}'", e);
-                0
-            }
-        };
-        self._job_delete_by_id(id, "").await;
-    }
-
-    pub async fn job_set_file_or_dir(
-        &mut self,
-        file_or_dir_name: &str,
-        color: lxptypes::ColorPrint,
-        mode: lxptypes::Mode,
-        ship: lxptypes::Ship,
-    ) {
-        match std::fs::metadata(file_or_dir_name) {
-            Ok(md) => {
-                if md.is_file() {
-                    match self
-                        .api()
-                        .set_job(&file_or_dir_name, &color, &mode, &ship)
-                        .await
-                    {
-                        Ok(_r) => info!("  Job {} sent", &file_or_dir_name),
-                        Err(_) => (), // Error message was already issued by set_job()
-                    }
-                };
-                if md.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(file_or_dir_name) {
-                        let api = &self.api();
-                        let puts = stream::iter(entries.into_iter().map(|entry| {
-                            async move {
-                                if let Ok(entry) = entry {
-                                    let path = entry.path();
-                                    if path.is_file() {
-                                        let p = path.to_str().unwrap();
-                                        match api.set_job(&p, &color, &mode, &ship).await {
-                                            Ok(_r) => info!("  Job {} sent", &p),
-                                            Err(_) => (), // Error message was already issued by set_job()
-                                        }
-                                    }
-                                }
-                            }
-                        }))
-                        .buffer_unordered(5)
-                        .collect::<Vec<()>>(); // up to 5 concurrent async requests
-                        puts.await;
-                    }
-                }
-            }
-            Err(e) => error!("Opening send file: {}", e),
-        };
-    }
-    pub async fn watch_dir(
-        &mut self,
-        dir_name: &PathBuf,
-        color: lxptypes::ColorPrint,
-        mode: lxptypes::Mode,
-        ship: lxptypes::Ship,
-    ) {
-        debug!("Watch directory '{:#?}' for new PDF files", &dir_name);
-        let watch_dir = std::path::Path::new(&dir_name);
-        match fs::create_dir_all(&watch_dir) {
-            Ok(_) => (),
-            Err(e) => error!("Could not create watch_dir {:#?}, error {}", &watch_dir, e),
-        }
-
-        if fs::create_dir_all(watch_dir.join("sent")).is_err() {
-            error!("Could not create sent directory");
-            return;
-        }
-        let (tx, mut rx) = unbounded_channel();
-        let mut watcher = recommended_watcher(move |event| {
-            let _ = tx.send(event);
-        })
-        .expect("filesystem watcher is available");
-
-        // Add a path to be watched and monitored for changes.
-        match watcher.watch(&dir_name, RecursiveMode::NonRecursive) {
-            Ok(_) => (),
-            Err(e) => error!("Couldn't watch '{:#?}', error {}", &dir_name, e),
-        };
-
-        loop {
-            let pdf_path = match rx.recv().await {
-                Some(Ok(event))
-                    if matches!(
-                        event.kind,
-                        EventKind::Access(AccessKind::Close(AccessMode::Write))
-                            | EventKind::Modify(ModifyKind::Name(RenameMode::To))
-                    ) =>
-                {
-                    event.paths.into_iter().find(|path| {
-                        path.extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-                    })
-                }
-                Some(Ok(_)) => None,
-                Some(Err(e)) => {
-                    error!("Filesystem watch failed: {}", e);
-                    return;
-                }
-                None => return,
-            };
-
-            match pdf_path {
-                Some(from_path) => {
-                    // push pdf file to print service
-                    match self
-                        .api()
-                        .set_job(from_path.to_str().unwrap(), &color, &mode, &ship)
-                        .await
-                    {
-                        Ok(_r) => info!("File {:#?} sent", &from_path),
-                        Err(error) => {
-                            error!(
-                                "Upload was not confirmed: {}; refusing to archive or retry",
-                                error
-                            );
-                            return;
-                        }
-                    }
-
-                    // move pdf filt to sent directory
-                    let file_name = from_path.file_name().unwrap();
-                    let to_path = from_path.parent().unwrap().join("sent").join(&file_name);
-                    match fs::rename(&from_path, &to_path) {
-                        Ok(_) => trace!("Move {:#?} to directory sent", &from_path),
-                        Err(e) => error!("Could not move PDF file {}", e),
-                    };
-                }
-                None => (),
-            }
-        }
-    }
+    Ok(())
 }

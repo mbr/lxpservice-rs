@@ -1,269 +1,267 @@
-/// LxpApi - a general usable crate to access the LetterXpress Web API
-///
-/// LetterXpres (https://www.letterxpress.de/) offers a service using a Web
-/// API to make printing services easy to use. PDF documents can be
-/// transferred to be printed and sent by Letterxpress. This is not only
-/// convenient, but also very inexpensive.
-///
-/// The Crate LxpApi encapsulates all the software routines necessary to use
-/// Letterxpress' Web API. This Crate should be usable in any application.
-///
-/// The error handling is done in a way that outside of this crate it can be
-///  decided how to handle errors. For logging, LxpApi uses the Crate log
-/// (https://github.com/rust-lang/log), which allows flexible use and
-/// integration in any app.
-extern crate base64;
-extern crate md5;
-extern crate reqwest;
-extern crate serde_json;
+//! Transports typed LetterXpress requests without logging sensitive payloads.
 
-use std::{fmt, io::Read};
+use std::{num::NonZeroU64, time::Duration};
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-use log::{debug, error, trace};
+use reqwest::{Client, Method, StatusCode};
+use serde::{de::DeserializeOwned, Serialize};
 
-use crate::lxptypes::*;
+use crate::lxptypes::{
+    ApiMode, Auth, Balance, Invoice, Invoices, JobFilter, Jobs, Letter, Price, PrintJob, Quote,
+    Request, Response, Specification,
+};
 
-#[derive(Debug, Clone)]
+/// Limits server responses, including Base64 invoice data.
+const MAX_RESPONSE_BYTES: usize = 50_000_000;
+
+/// Owns credentials and a reusable HTTP connection pool.
 pub struct LxpApi {
-    url: String,
-    auth: SubNameAndKey,
-    client: reqwest::Client,
+    /// Locates the API version root.
+    base_url: String,
+    /// Identifies the account.
+    username: String,
+    /// Authenticates requests.
+    apikey: String,
+    /// Determines upload processing semantics.
+    mode: ApiMode,
+    /// Pools HTTPS connections without retries or redirects.
+    client: Client,
 }
 
-pub enum LxpApiError {
-    PdfFileError,
-    RestError,
-    JsonError,
-}
-
-// user-facing output
-impl fmt::Display for LxpApiError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            LxpApiError::PdfFileError => write!(f, "No PDF ile or file reading error"),
-            LxpApiError::RestError => write!(f, "Web service: check url, user and apikey"),
-            LxpApiError::JsonError => {
-                write!(f, "Internal JSON error, please inform the developers")
-            }
-        }
-    }
-}
-
-impl fmt::Debug for LxpApiError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{{ file: {}, line: {} }}", file!(), line!()) // programmer-facing output
-    }
+/// Describes failures without including response bodies or credentials.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// Reports a network or TLS failure.
+    #[error("HTTP transport failed")]
+    Transport {
+        /// Preserves the underlying transport error.
+        #[source]
+        source: reqwest::Error,
+    },
+    /// Reports a rejected HTTP request.
+    #[error("HTTP request rejected with status {status}")]
+    Http {
+        /// Gives the HTTP status code.
+        status: StatusCode,
+    },
+    /// Reports a service-level error even when HTTP succeeded.
+    #[error("API request rejected with status {status}")]
+    Api {
+        /// Gives the service status code.
+        status: u16,
+    },
+    /// Reports malformed or unexpected response data.
+    #[error("invalid API response")]
+    Json {
+        /// Preserves decoding context without returning the payload.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Rejects successful responses lacking endpoint data.
+    #[error("API response is missing data")]
+    MissingData,
+    /// Bounds memory used for server responses.
+    #[error("API response exceeds the size limit")]
+    ResponseTooLarge,
+    /// Requires a separate opt-in before paid submissions.
+    #[error("live submission requires --yes; test mode does not print")]
+    LiveConfirmationRequired,
+    /// Warns that a failed upload may already have been accepted.
+    #[error("submission not confirmed; inspect recent jobs before retrying")]
+    Unconfirmed {
+        /// Preserves the original failure.
+        #[source]
+        source: Box<Error>,
+    },
 }
 
 impl LxpApi {
-    pub fn new(user_name: &str, api_key: &str, url: &str) -> LxpApi {
-        let auth = SubNameAndKey {
-            username: user_name.into(),
-            apikey: api_key.into(),
-        };
-        let client = reqwest::Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .expect("HTTP client configuration is valid");
-        LxpApi {
-            url: url.into(),
-            auth: auth,
-            client: client,
-        }
+    /// Creates a client for the production service with explicit processing mode.
+    pub fn new(username: String, apikey: String, mode: ApiMode) -> Result<Self, Error> {
+        let client = client(true)?;
+        Ok(Self {
+            base_url: "https://api.letterxpress.de/v3".into(),
+            username,
+            apikey,
+            mode,
+            client,
+        })
     }
 
-    pub async fn delete_job(&self, id: i32) -> Result<Response, LxpApiError> {
-        let sub_url = format!("deleteJob/{}", id);
-        let mut body = RequestLetter::default();
-        body.auth = self.auth.clone();
-        self.delete(&sub_url, &body).await
+    /// Retrieves the available account balance.
+    pub async fn balance(&self) -> Result<Balance, Error> {
+        self.get("balance").await
     }
 
-    pub async fn get_blance(&self) -> Result<Response, LxpApiError> {
-        let mut body = RequestLetter::default();
-        body.auth = self.auth.clone();
-        self.get("getBalance", &body).await
+    /// Quotes a document without uploading its contents.
+    pub async fn price(&self, specification: Specification) -> Result<Price, Error> {
+        self.request(Method::GET, "price", Some(Quote { specification }))
+            .await?
+            .ok_or(Error::MissingData)
     }
 
-    pub async fn get_jobs_hold(&self) -> Result<Response, LxpApiError> {
-        let mut body = RequestLetter::default();
-        body.auth = self.auth.clone();
-        self.get("getJobs/hold", &body).await
-    }
-
-    pub async fn get_jobs_queue(&self, days: i32) -> Result<Response, LxpApiError> {
-        let mut body = RequestLetter::default();
-        body.auth = self.auth.clone();
-        let sub_url = format!("getJobs/queue/{}", days);
-        self.get(&sub_url, &body).await
-    }
-
-    pub async fn get_jobs_sent(&self, days: i32) -> Result<Response, LxpApiError> {
-        let mut body = RequestLetter::default();
-        body.auth = self.auth.clone();
-        let sub_url = format!("getJobs/sent/{}", days);
-        self.get(&sub_url, &body).await
-    }
-
-    pub async fn list_invoices(&self) -> Result<Response, LxpApiError> {
-        let mut body = RequestLetter::default();
-        body.auth = self.auth.clone();
-        self.get("listInvoices", &body).await
-    }
-
-    pub async fn get_last_invoice(&self) -> Result<(Response, Vec<u8>), LxpApiError> {
-        let mut body = RequestLetter::default();
-        body.auth = self.auth.clone();
-        let r: Response = self.get("getInvoice", &body).await?;
-        match &r.invoice {
-            Some(invoice) => {
-                let pdf_base64_data = invoice.pdf_data.as_ref().ok_or(LxpApiError::JsonError)?;
-                let pdf_data = STANDARD
-                    .decode(pdf_base64_data)
-                    .map_err(|_| LxpApiError::JsonError)?;
-                return Ok((r, pdf_data));
+    /// Retrieves a page of jobs without following server-supplied URLs.
+    pub async fn jobs(&self, filter: Option<JobFilter>, page: u32) -> Result<Jobs, Error> {
+        let mut path = format!("printjobs?page={page}");
+        if let Some(filter) = filter {
+            let value = serde_json::to_value(filter).map_err(|source| Error::Json { source })?;
+            if let Some(filter) = value.as_str() {
+                path.push_str("&filter=");
+                path.push_str(filter);
             }
-            None => return Ok((r, Vec::new())),
         }
+        self.get(&path).await
     }
 
-    pub async fn get_invoice(&self, id: i32) -> Result<(Response, Vec<u8>), LxpApiError> {
-        let mut body = RequestLetter::default();
-        body.auth = self.auth.clone();
-        let sub_url = format!("getInvoice/{}", id);
-        let r: Response = self.get(&sub_url, &body).await?;
-        match &r.invoice {
-            Some(invoice) => {
-                let pdf_base64_data = invoice.pdf_data.as_ref().ok_or(LxpApiError::JsonError)?;
-                let pdf_data = STANDARD
-                    .decode(pdf_base64_data)
-                    .map_err(|_| LxpApiError::JsonError)?;
-                return Ok((r, pdf_data));
-            }
-            None => return Ok((r, Vec::new())),
-        }
+    /// Retrieves processing and tracking information for a job.
+    pub async fn job(&self, id: NonZeroU64) -> Result<PrintJob, Error> {
+        self.get(&format!("printjobs/{id}")).await
     }
 
-    pub async fn set_job(
+    /// Cancels a job subject to the provider's cancellation window.
+    pub async fn cancel(&self, id: NonZeroU64) -> Result<(), Error> {
+        self.request::<(), ()>(Method::DELETE, &format!("printjobs/{id}"), None)
+            .await?;
+        Ok(())
+    }
+
+    /// Submits a document once, guarding the effective mode rather than its source.
+    pub async fn send(&self, letter: Letter, confirmed: bool) -> Result<PrintJob, Error> {
+        if self.mode == ApiMode::Live && !confirmed {
+            return Err(Error::LiveConfirmationRequired);
+        }
+        self.request(Method::POST, "printjobs", Some(letter))
+            .await
+            .and_then(|job| job.ok_or(Error::MissingData))
+            .map_err(|source| Error::Unconfirmed {
+                source: Box::new(source),
+            })
+    }
+
+    /// Retrieves a page of invoices.
+    pub async fn invoices(&self, page: u32) -> Result<Invoices, Error> {
+        self.get(&format!("invoices?page={page}")).await
+    }
+
+    /// Retrieves a single invoice including its encoded PDF.
+    pub async fn invoice(&self, id: NonZeroU64) -> Result<Invoice, Error> {
+        self.get(&format!("invoices/{id}")).await
+    }
+
+    /// Requests endpoint data with an authenticated GET body.
+    async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
+        self.request::<(), T>(Method::GET, path, None)
+            .await?
+            .ok_or(Error::MissingData)
+    }
+
+    /// Performs a single bounded request without logging request or response bodies.
+    async fn request<L: Serialize, T: DeserializeOwned>(
         &self,
-        file_name: &str,
-        color: &ColorPrint,
-        mode: &Mode,
-        ship: &Ship,
-    ) -> Result<Response, LxpApiError> {
-        let mut letter = SubLetterData::default();
-        match color {
-            ColorPrint::Color => letter.specification.color = 4,
-            ColorPrint::BlackAndWhite => letter.specification.color = 1,
-        }
-        match mode {
-            Mode::Simplex => letter.specification.mode = "simplex".into(),
-            Mode::Duplex => letter.specification.mode = "duplex".into(),
-        }
-        match ship {
-            Ship::International => letter.specification.ship = "international".into(),
-            Ship::National => letter.specification.ship = "national".into(),
-        }
-
-        if !file_name.to_lowercase().ends_with(".pdf") {
-            trace!("No PDF file - ignored {}", &file_name);
-            return Err(LxpApiError::PdfFileError);
+        method: Method,
+        path: &str,
+        letter: Option<L>,
+    ) -> Result<Option<T>, Error> {
+        let body = Request {
+            auth: Auth {
+                username: &self.username,
+                apikey: &self.apikey,
+                mode: self.mode,
+            },
+            letter,
         };
-
-        let path = std::path::Path::new(&file_name);
-        let pdf_file = match std::fs::File::open(&path) {
-            Err(why) => {
-                error!("couldn't open {}", why);
-                return Err(LxpApiError::PdfFileError);
+        let mut response = self
+            .client
+            .request(method, format!("{}/{path}", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| Error::Transport { source })?;
+        if !response.status().is_success() {
+            return Err(Error::Http {
+                status: response.status(),
+            });
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|source| Error::Transport { source })?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(Error::ResponseTooLarge);
             }
-            Ok(file) => file,
-        };
-        letter.address = path
-            .file_name()
-            .ok_or(LxpApiError::PdfFileError)?
-            .to_string_lossy()
-            .into_owned();
-
-        let mut pdf_content = Vec::new();
-        match pdf_file.take(35_000_001).read_to_end(&mut pdf_content) {
-            Err(why) => {
-                error!("couldn't read {}", why);
-                return Err(LxpApiError::PdfFileError);
-            }
-            Ok(_c) => (),
-        };
-
-        if pdf_content.len() > 35_000_000 || !pdf_content.starts_with(b"%PDF-") {
-            return Err(LxpApiError::PdfFileError);
+            bytes.extend_from_slice(&chunk);
         }
-        letter.base64_file = STANDARD.encode(pdf_content);
-        letter.base64_checksum = format!("{:x}", md5::compute(&letter.base64_file));
+        decode(&bytes)
+    }
+}
 
-        let body = RequestLetter {
-            auth: self.auth.clone(),
-            letter: letter,
-        };
+/// Configures transport policy; production callers require HTTPS.
+fn client(https_only: bool) -> Result<Client, Error> {
+    Client::builder()
+        .https_only(https_only)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|source| Error::Transport { source })
+}
 
-        self.post("setJob", &body).await
+#[cfg(test)]
+mod transport_tests;
+
+/// Validates a service envelope independently of HTTP transport.
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<Option<T>, Error> {
+    let response: Response<T> =
+        serde_json::from_slice(bytes).map_err(|source| Error::Json { source })?;
+    if !(200..300).contains(&response.status) {
+        return Err(Error::Api {
+            status: response.status,
+        });
+    }
+    Ok(response.data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode, Error, LxpApi};
+    use crate::lxptypes::{ApiMode, Balance, Letter, Specification};
+
+    /// Handles success, service errors and body-less cancellation responses.
+    #[test]
+    fn response_envelopes() {
+        let balance = decode::<Balance>(br#"{"status":200,"data":{"balance":5,"currency":"EUR"}}"#)
+            .expect("valid envelope")
+            .expect("balance data");
+        assert_eq!(balance.balance, 5.0);
+        assert!(decode::<()>(br#"{"status":200,"message":"deleted"}"#)
+            .expect("valid cancellation")
+            .is_none());
+        assert!(matches!(
+            decode::<Balance>(br#"{"status":400,"message":"bad request"}"#),
+            Err(Error::Api { status: 400 })
+        ));
+        assert!(matches!(
+            decode::<Balance>(b"not json"),
+            Err(Error::Json { .. })
+        ));
     }
 
-    async fn delete(&self, sub_url: &str, body: &RequestLetter) -> Result<Response, LxpApiError> {
-        let url = self.url.clone() + sub_url;
-        trace!("Url {}", &url);
-        let response = self.client.delete(&url).json(body).send().await;
-        self.handle_response(response).await
-    }
-
-    async fn get(&self, sub_url: &str, body: &RequestLetter) -> Result<Response, LxpApiError> {
-        let url = self.url.clone() + sub_url;
-        trace!("Url {}", &url);
-        let response = self.client.get(&url).json(body).send().await;
-        self.handle_response(response).await
-    }
-
-    async fn post(&self, sub_url: &str, body: &RequestLetter) -> Result<Response, LxpApiError> {
-        let url = self.url.clone() + sub_url;
-        trace!("Url {}", &url);
-        let response = self.client.post(&url).json(body).send().await;
-        self.handle_response(response).await
-    }
-
-    async fn handle_response(
-        &self,
-        response: Result<reqwest::Response, reqwest::Error>,
-    ) -> Result<Response, LxpApiError> {
-        let r2 = match response {
-            Ok(r) => {
-                debug!("Response received");
-                r
-            }
-            Err(e) => {
-                debug!("{}", e);
-                return Err(LxpApiError::RestError);
-            }
-        };
-
-        if !r2.status().is_success() {
-            return Err(LxpApiError::RestError);
-        }
-        let json_res = match r2.text().await {
-            Ok(r) => r,
-            Err(e) => {
-                debug!("{}", e);
-                return Err(LxpApiError::RestError);
-            }
-        };
-        match serde_json::from_str::<Response>(&json_res) {
-            Ok(r) if r.status == 200 => return Ok(r),
-            Ok(_) => return Err(LxpApiError::RestError),
-            Err(e) => {
-                debug!("Problem during JSON parsing: {}", e);
-                return Err(LxpApiError::JsonError);
-            }
-        };
+    /// Blocks live uploads before any transport activity.
+    #[tokio::test]
+    async fn live_requires_confirmation() {
+        let api = LxpApi::new("dummy".into(), "dummy".into(), ApiMode::Live).expect("valid client");
+        let letter = Letter::from_pdf(
+            b"%PDF-1.7",
+            "test.pdf".into(),
+            Specification::default(),
+            None,
+        )
+        .expect("valid header");
+        assert!(matches!(
+            api.send(letter, false).await,
+            Err(Error::LiveConfirmationRequired)
+        ));
     }
 }

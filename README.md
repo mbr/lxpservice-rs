@@ -1,179 +1,81 @@
-lxpservice-rs - a command line tool to operate LetterXpress web service.
-=
+# lxp
 
-Letterxpress (https://www.letterxpress.de/) provides a service using a web API to easily use printing services. PDF documents can be transferred to be printed and sent by Letterxpress. Not only is this convenient, but it is also offered at an amazingly low price.
-
-The command line tool lxp makes it possible to use this web service with a command line tool. This tool is written in rust and therefore platform neutral, if it has only been tested under Linux so far.
+A Rust command-line client for [LetterXpress](https://www.letterxpress.de/),
+using its [v3 API](https://www.letterxpress.de/versandwege/api).
 
 ## Development
 
-The development environment uses the `github:mbr/flakes#rust` template.
-Run `direnv allow` to load the pinned Rust toolchain and native dependencies.
-Use `./check.sh` for checks and tests, `./format.sh` for formatting, and
-`nix build` to build the CLI at `result/bin/lxp`.
+The Nix environment is based on `github:mbr/flakes#rust`. Run `direnv allow`,
+then `./check.sh` for checks and tests and `./format.sh` for formatting.
+`nix build` produces `result/bin/lxp`. CI builds and tests through Nix.
 
-Copy `.env.example` to `.env` and fill in your credentials locally. Direnv
-loads `.env` into the shell; `.env` and its variants are ignored by Git and
-must never be committed. The existing CLI still uses its legacy profile
-configuration: the `LXP_*` variables are reserved for the API v3 migration
-and are not yet consumed by the application.
+Copy `.env.example` to `.env` and supply `LXP_USERNAME` and `LXP_API_KEY`.
+Direnv loads `.env`; plain `nix develop` does not. Secrets and `.env` variants
+are ignored by Git. Never commit them or put credentials in Nix expressions.
+The CLI consumes environment variables, not `.env` files directly.
 
-The possibilities of the tool are presented below.
+## Usage
 
-Getting help
-````
-$ lxp --help
-lxp 0.1
-Winfried Simon <winfried.simon@gmail.com>
-Command line tool to manage LetterXpress print jobs
+```sh
+lxp balance
+lxp price --pages 1
+lxp --mode test send letter.pdf --notice my-reference
+lxp jobs --filter draft --page 1
+lxp status 12345
+lxp cancel 12345
+lxp invoice list --page 1
+lxp invoice get 12345 --output invoice.pdf
+```
 
-USAGE:
-    lxp [FLAGS] [SUBCOMMAND]
+Output is JSON, except cancellation acknowledgments and local profile commands.
+Job and invoice lists return one page with pagination metadata. `done` means
+processing completed, not delivered. Registered-mail tracking is returned when
+available. Invoice downloads refuse to overwrite files.
 
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-    -v, --verbose    Be communicative
+Uploads default to black-and-white, simplex, domestic delivery. Use
+`--color color`, `--duplex` and `--shipping international` as appropriate.
+The PDF must already contain its destination address in the envelope window.
+Use the provider's [templates](https://www.letterxpress.de/downloads), A4 portrait,
+embedded fonts, flattened forms and no password restrictions. Local validation
+only checks size and the PDF header; the provider validates printability.
 
-SUBCOMMANDS:
-    help       Prints this message or the help of the given subcommand(s)
-    invoice    Handle invoices
-    job        Print job handling
-    profile    Create and maintain profiles
-    set        Set print job(s) on server
+`--mode test` explicitly overrides `LXP_MODE`. Test mode uses the real account's
+shopping cart: it does not print or incur postage. The website can inspect,
+delete or manually release these jobs. Unreleased drafts expire after seven days.
 
-````
-Getting help to subcommand
--
-````
-$ lxp profile --help
-lxp-profile 
-Create and maintain profiles
+Live mode immediately enters paid processing and requires a separate `--yes`:
 
-USAGE:
-    lxp profile [FLAGS] [ARGS]
+```sh
+lxp --mode live send letter.pdf --yes
+```
 
-FLAGS:
-    -d, --delete        Delete a single profile
-    -a, --delete_all    Delete all profiles
-    -h, --help          Prints help information
-    -n, --new           Create and select a new profile
-    -o, --overview      Show all profiles
-    -s, --switch        Switch to profile
-    -V, --version       Prints version information
+This confirmation also applies when live mode comes from `LXP_MODE`. Never use
+live mode just to test an integration. Cancellation is generally available for
+15 minutes, sometimes less near production cutoff; it is not a safety net.
 
-ARGS:
-    <profile>    Name of user profile
-    <user>       User name of print service
-    <url>        Url to print service
-    <api_key>    Api key of print service
+The service has no documented idempotency key. Uploads are not automatically
+retried. If an upload is unconfirmed, inspect recent jobs or the website before
+retrying. `--notice` is a correlation reference, not deduplication.
 
-A profile has a name and contains all information for accessing the web
-service. With the subcommand profile they can be displayed, created and
-deleted. You can also switch between them. 
-````
-This example shows the help text for the sub command profile. There are also help screens for the sub commands invoice, job and set available.
+A directory passed to `send` submits its PDFs sequentially and stops on failure.
+`watch-dir DIRECTORY` watches completed writes/renames, archives confirmed files
+under `sent`, and stops on errors or repeated paths. Event support varies by OS;
+manual `send` is preferable. Neither command recursively scans directories.
 
-User profile handling
-- 
+## Local profiles and migration
 
-Adde a new profile to the profile registry.
-````
-$ lxp profile -n <profile_name> <user_name> <url api_key>
-````
+Environment credentials are preferred. If both variables are absent, the client
+uses the selected profile in the platform configuration directory under
+`lxp/lxp.toml`. Partial environment credentials are rejected rather than mixed
+with a profile. `profile save NAME`, `profile list`, `profile select NAME` and
+`profile delete NAME` maintain stored profiles. Saving writes credentials to disk.
+Legacy profile URLs are ignored: requests always use the official HTTPS v3 host.
 
-Delete a user profile
-````
-$ lxp profile -d <profile_name>
-````
+The v3 CLI replaces the old flag-based job and invoice commands with explicit
+subcommands. `set` remains an alias for `send`. Quotes and individual job status
+queries are now available. Pagination replaces the old implicit seven-day list.
+Bulk cancellation is intentionally not exposed; cancel explicit IDs instead.
 
-Delete all user profiles
-````
-$ lxp profile -a
-````
+## License
 
-Switch to a given profile
-````
-$ lxp profile -s <profile_name>
-````
-
-Show all profiles
-````
-$ lxp profile -o
-Active profile 'profile1'
-
-<profile>       <user>              <url>
-profile1        user1               url1
-profile2        user2               url2
-profile3        user3               url3
-````
-
-Show and download invoices
--
-Download current invoice
-````
-$ lxp invoice -c
-Writing file '2020-10-31_profile-invoice.pdf'
-````
-
-Show list of invoices
-````
-$ lxp invoice -l
-
-Date           Id     Cost
-2020-10-31  30711 149.98 €
-2019-01-31  11328  27.12 €
-2019-09-30  16844 107.27 €
-````
-
-Show and delete print jobs
--
-List all print jobs on server
-````
-$ lxp job -o
-ctive profile 'profile1'
-Credit balance 98.14 €
-
-These letters will be sent soon:
-
-Date           Id Pgs Col Dpx Shp Cost Filename                           
-2020-12-10  57451   1   4 sim nat 0.93 letter1.pdf                        
-2020-12-10  57452   1   4 sim nat 0.93 letter2.pdf                        
-The sum of the costs is 1.86 €
-
-These letters are in the queue (credit exhausted):
-<No data>
-
-These letters are sent in the last 7 days:
-<No data>
-````
-Delete print job by id
-````
-$ lxp job -d -i 57451
-  Job id 57451  deleted
-````
-
-Delete all print jobs
-````
-$ lxp job -d -a
-  Job id 57452 letter1.pdf deleted
-  Job id 57454 letter2.pdf deleted
-  Job id 57453 letter3.pdf deleted
-3 job(s) deleted
-````
-Upload print jobs to the web service
--
-Upload a single pdf file
-````
-$ lxp set letter1.pdf 
-  Job letter1.pdf sent
-````
-Upload all pdf files of a directory
-````
-$ lxp set pdf_dir
-  Job pdf_dir/letter3.pdf sent
-  Job pdf_dir/letter5.pdf sent
-  Job pdf_dir/letter4.pdf sent
-  Job pdf_dir/letter2.pdf sent
-  Job pdf_dir/letter1.pdf sent
-````
+MIT. See `LICENSE` for the original copyright notice.
