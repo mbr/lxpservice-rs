@@ -67,6 +67,7 @@
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
                 ./src
+                ./tests
                 ./Cargo.toml
                 ./Cargo.lock
                 ./README.md

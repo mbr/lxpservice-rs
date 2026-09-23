@@ -32,6 +32,9 @@ pub struct Cli {
         default_value = "test"
     )]
     pub mode: ApiMode,
+    /// Locates durable submission receipts; defaults to the local data directory.
+    #[arg(long, env = "LXP_STATE_DIR", global = true)]
+    pub state_dir: Option<PathBuf>,
     /// Chooses the operation to perform.
     #[command(subcommand)]
     pub command: Command,
@@ -170,6 +173,9 @@ pub struct Send {
     /// Confirms paid submission when the effective mode is live.
     #[arg(long)]
     pub yes: bool,
+    /// Allows a new attempt for an already recorded PDF after manual reconciliation.
+    #[arg(long)]
+    pub allow_duplicate: bool,
     /// Supplies a correlation reference, not an idempotency key.
     #[arg(long)]
     pub notice: Option<String>,

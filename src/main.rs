@@ -8,6 +8,7 @@ mod lxpapi;
 mod lxpcommands;
 mod lxpconfig;
 mod lxptypes;
+mod submissions;
 
 use std::process::ExitCode;
 
@@ -72,7 +73,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
     };
     let (username, apikey) = credentials(cli.username, cli.api_key, profile)?;
     let api = LxpApi::new(username, apikey, cli.mode).map_err(Error::Api)?;
-    lxpcommands::run(&api, cli.command).await
+    lxpcommands::run(&api, cli.command, cli.state_dir).await
 }
 
 /// Resolves one complete credential source without mixing accounts.

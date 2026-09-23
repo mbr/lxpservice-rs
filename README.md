@@ -7,7 +7,10 @@ using its [v3 API](https://www.letterxpress.de/versandwege/api).
 
 The Nix environment is based on `github:mbr/flakes#rust`. Run `direnv allow`,
 then `./check.sh` for checks and tests and `./format.sh` for formatting.
-`nix build` produces `result/bin/lxp`. CI builds and tests through Nix.
+`nix build` produces `result/bin/lxp`. CI builds, lints, checks documentation and
+tests through Nix. Checks use synthetic credentials and loopback HTTP servers.
+Diagnostics use `tracing` on stderr, defaulting to `info`; `RUST_LOG` or `-v`
+controls verbosity. Credentials and document payloads are never logged.
 
 Copy `.env.example` to `.env` and supply `LXP_USERNAME` and `LXP_API_KEY`.
 Direnv loads `.env`; plain `nix develop` does not. Secrets and `.env` variants
@@ -55,7 +58,20 @@ live mode just to test an integration. Cancellation is generally available for
 
 The service has no documented idempotency key. Uploads are not automatically
 retried. If an upload is unconfirmed, inspect recent jobs or the website before
-retrying. `--notice` is a correlation reference, not deduplication.
+retrying. `--notice` is a correlation reference, not provider-side deduplication.
+
+Before each upload the client creates a private, durable receipt under the local
+data directory at `lxp/submissions`. Use `--state-dir` or `LXP_STATE_DIR` to choose
+another directory. Receipts contain processing mode and acknowledgement state,
+not credentials, addresses or PDF contents. A pending receipt remains after an
+error or interruption; a successful upload records the job ID atomically.
+The default provider notice contains the local receipt reference.
+
+The same PDF and account cannot be submitted twice in the same mode without
+`--allow-duplicate`. This also covers renamed files and changed print options.
+Only use that flag after reconciling earlier attempts; it does not prevent
+provider-side duplicates. Keep the receipt directory across invocations and do
+not bypass it to retry a timeout. Different machines do not share local receipts.
 
 A directory passed to `send` submits its PDFs sequentially and stops on failure.
 `watch-dir DIRECTORY` watches completed writes/renames, archives confirmed files

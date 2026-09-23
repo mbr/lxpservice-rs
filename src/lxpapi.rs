@@ -88,6 +88,24 @@ impl LxpApi {
         })
     }
 
+    /// Identifies the account for local duplicate detection.
+    pub fn account(&self) -> &str {
+        &self.username
+    }
+
+    /// Reports the effective processing mode.
+    pub fn mode(&self) -> ApiMode {
+        self.mode
+    }
+
+    /// Rejects unconfirmed paid submissions before any filesystem or network work.
+    pub fn authorize_send(&self, confirmed: bool) -> Result<(), Error> {
+        if self.mode == ApiMode::Live && !confirmed {
+            return Err(Error::LiveConfirmationRequired);
+        }
+        Ok(())
+    }
+
     /// Retrieves the available account balance.
     pub async fn balance(&self) -> Result<Balance, Error> {
         self.get("balance").await
@@ -127,9 +145,7 @@ impl LxpApi {
 
     /// Submits a document once, guarding the effective mode rather than its source.
     pub async fn send(&self, letter: Letter, confirmed: bool) -> Result<PrintJob, Error> {
-        if self.mode == ApiMode::Live && !confirmed {
-            return Err(Error::LiveConfirmationRequired);
-        }
+        self.authorize_send(confirmed)?;
         self.request(Method::POST, "printjobs", Some(letter))
             .await
             .and_then(|job| job.ok_or(Error::MissingData))

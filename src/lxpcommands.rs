@@ -1,6 +1,10 @@
 //! Executes explicit client operations and bounded document submissions.
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    num::NonZeroU64,
+    path::{Path, PathBuf},
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use notify::{
@@ -17,11 +21,27 @@ use crate::{
     clidef::{Command, InvoiceCommand, Send},
     lxpapi::{self, LxpApi},
     lxptypes::{DocumentError, Letter, MAX_PDF_BYTES, PrintJob, Specification},
+    submissions::{self, Reservation},
 };
 
 /// Describes command failures without relying on logging side effects.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Reports durable receipt failures before submission.
+    #[error("{0}")]
+    Receipt(#[source] submissions::Error),
+    /// Preserves a confirmed identifier even when updating its receipt fails.
+    #[error("job {job_id} was accepted but its receipt update failed; do not resend")]
+    AcceptedWithoutReceipt {
+        /// Identifies the accepted remote job.
+        job_id: NonZeroU64,
+        /// Preserves the local persistence failure.
+        #[source]
+        source: submissions::Error,
+    },
+    /// Requires an available local data directory for persistent receipts.
+    #[error("could not locate the local data directory; set --state-dir")]
+    StateDirectory,
     /// Reports local profile failure.
     #[error("{0}")]
     Config(#[source] crate::lxpconfig::Error),
@@ -57,7 +77,7 @@ pub enum Error {
 }
 
 /// Runs a parsed API operation and prints structured results to stdout.
-pub async fn run(api: &LxpApi, command: Command) -> Result<(), Error> {
+pub async fn run(api: &LxpApi, command: Command, state_dir: Option<PathBuf>) -> Result<(), Error> {
     match command {
         Command::Balance => output(&api.balance().await.map_err(Error::Api)?),
         Command::Price { pages, print } => {
@@ -74,8 +94,14 @@ pub async fn run(api: &LxpApi, command: Command) -> Result<(), Error> {
             println!("Canceled job {id}");
             Ok(())
         }
-        Command::Send(send) => send_path(api, &send).await,
-        Command::WatchDir(send) => watch(api, &send).await,
+        Command::Send(send) => {
+            api.authorize_send(send.yes).map_err(Error::Api)?;
+            send_path(api, &send, &state_directory(state_dir)?).await
+        }
+        Command::WatchDir(send) => {
+            api.authorize_send(send.yes).map_err(Error::Api)?;
+            watch(api, &send, &state_directory(state_dir)?).await
+        }
         Command::Invoice { command } => match command {
             InvoiceCommand::List { page } => {
                 output(&api.invoices(page.get()).await.map_err(Error::Api)?)
@@ -102,6 +128,13 @@ pub async fn run(api: &LxpApi, command: Command) -> Result<(), Error> {
     }
 }
 
+/// Resolves receipt storage without creating it for read-only operations.
+fn state_directory(directory: Option<PathBuf>) -> Result<PathBuf, Error> {
+    directory
+        .or_else(|| dirs::data_local_dir().map(|path| path.join("lxp/submissions")))
+        .ok_or(Error::StateDirectory)
+}
+
 /// Prints a typed response without using diagnostics as the data channel.
 fn output<T: Serialize>(value: &T) -> Result<(), Error> {
     println!(
@@ -112,12 +145,12 @@ fn output<T: Serialize>(value: &T) -> Result<(), Error> {
 }
 
 /// Submits directory entries sequentially and stops on the first unconfirmed job.
-async fn send_path(api: &LxpApi, send: &Send) -> Result<(), Error> {
+async fn send_path(api: &LxpApi, send: &Send, state_dir: &Path) -> Result<(), Error> {
     let metadata = tokio::fs::symlink_metadata(&send.path)
         .await
         .map_err(Error::Io)?;
     if metadata.is_file() {
-        return output(&send_one(api, send, &send.path).await?);
+        return output(&send_one(api, send, &send.path, state_dir).await?);
     }
     if !metadata.is_dir() {
         return Err(Error::InvalidPath);
@@ -134,14 +167,19 @@ async fn send_path(api: &LxpApi, send: &Send) -> Result<(), Error> {
         return Err(Error::InvalidPath);
     }
     for path in paths {
-        output(&send_one(api, send, &path).await?)?;
+        output(&send_one(api, send, &path, state_dir).await?)?;
     }
     Ok(())
 }
 
 /// Reads a bounded PDF and makes exactly one application-level upload attempt.
 #[tracing::instrument(skip_all, level = "error")]
-async fn send_one(api: &LxpApi, send: &Send, path: &Path) -> Result<PrintJob, Error> {
+async fn send_one(
+    api: &LxpApi,
+    send: &Send,
+    path: &Path,
+    state_dir: &Path,
+) -> Result<PrintJob, Error> {
     if !is_pdf(path)
         || !tokio::fs::symlink_metadata(path)
             .await
@@ -161,15 +199,32 @@ async fn send_one(api: &LxpApi, send: &Send, path: &Path) -> Result<PrintJob, Er
         .and_then(|name| name.to_str())
         .ok_or(Error::InvalidPath)?
         .to_owned();
-    let letter = Letter::from_pdf(
+    let mut letter = Letter::from_pdf(
         &pdf,
         filename,
         Specification::from(&send.print),
         send.notice.clone(),
     )
     .map_err(Error::Document)?;
+    let reservation = Reservation::create(
+        state_dir,
+        api.account(),
+        api.mode(),
+        &pdf,
+        send.allow_duplicate,
+    )
+    .map_err(Error::Receipt)?;
+    if letter.notice.is_none() {
+        letter.notice = Some(reservation.reference().to_owned());
+    }
     let job = api.send(letter, send.yes).await.map_err(Error::Api)?;
-    tracing::info!(job_id = %job.id, status = %job.status, "submission confirmed");
+    tracing::info!(job_id = %job.id, mode = ?api.mode(), "submission confirmed");
+    reservation
+        .accept(job.id)
+        .map_err(|source| Error::AcceptedWithoutReceipt {
+            job_id: job.id,
+            source,
+        })?;
     Ok(job)
 }
 
@@ -180,7 +235,7 @@ fn is_pdf(path: &Path) -> bool {
 }
 
 /// Watches completed writes and archives only confirmed submissions.
-async fn watch(api: &LxpApi, send: &Send) -> Result<(), Error> {
+async fn watch(api: &LxpApi, send: &Send, state_dir: &Path) -> Result<(), Error> {
     tokio::fs::create_dir_all(send.path.join("sent"))
         .await
         .map_err(Error::Io)?;
@@ -209,7 +264,7 @@ async fn watch(api: &LxpApi, send: &Send) -> Result<(), Error> {
             if !attempted.insert(path.clone()) {
                 return Err(Error::RepeatedPath);
             }
-            let job = send_one(api, send, &path).await?;
+            let job = send_one(api, send, &path, state_dir).await?;
             output(&job)?;
             let filename = path.file_name().ok_or(Error::InvalidPath)?;
             let destination = send.path.join("sent").join(filename);
