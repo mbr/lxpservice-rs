@@ -156,7 +156,7 @@ impl Reservation {
     }
 }
 
-/// Persists directory-entry changes on platforms supporting directory synchronization.
+/// Persists directory entries where directory synchronization is supported.
 fn sync_directory(directory: &Path) -> Result<(), Error> {
     #[cfg(unix)]
     fs::File::open(directory)

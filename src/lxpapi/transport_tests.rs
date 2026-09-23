@@ -88,7 +88,7 @@ async fn transport_contract() {
 
     let (api, task) = server(reply(
         "200 OK",
-        r#"{"status":200,"data":{"id":7,"status":"draft","items":[]}}"#,
+        r#"{"status":200,"data":{"id":7,"status":"draft","filename_original":"API Testmode, Auftrag: 7","items":[{"address":"Example GmbH, Teststr. 1, 10115 Berlin","pages":1,"amount":0.81,"vat":0.15,"status":"hold","tracking_code":null,"tracking_status":null}]}}"#,
     ))
     .await;
     let letter = Letter::from_pdf(
@@ -98,14 +98,13 @@ async fn transport_contract() {
         None,
     )
     .expect("valid header");
-    assert_eq!(
-        api.send(letter, false)
-            .await
-            .expect("accepted job")
-            .id
-            .get(),
-        7
-    );
+    let job = api.send(letter, false).await.expect("accepted job");
+    assert_eq!(job.id.get(), 7);
+    assert_eq!(job.status, "draft");
+    assert_eq!(job.items.len(), 1);
+    assert_eq!(job.items[0].pages, 1);
+    assert_eq!(job.items[0].vat, 0.15);
+    assert!(job.items[0].address.starts_with("Example GmbH"));
     let (headers, body) = task.await.expect("server succeeds");
     assert!(headers.starts_with("POST /v3/printjobs HTTP/1.1"));
     assert_eq!(body["auth"]["mode"], "test");

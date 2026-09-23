@@ -14,7 +14,7 @@ fn cli() -> Command {
     command
 }
 
-/// Blocks environment-selected live uploads before reading files or creating receipts.
+/// Blocks unconfirmed live uploads before filesystem or network activity.
 #[test]
 fn live_mode_requires_separate_confirmation() {
     let directory = tempfile::tempdir().expect("temporary directory");

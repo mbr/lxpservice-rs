@@ -167,7 +167,7 @@ impl LxpApi {
             .ok_or(Error::MissingData)
     }
 
-    /// Performs a single bounded request without logging request or response bodies.
+    /// Performs one bounded request without logging sensitive payloads.
     #[tracing::instrument(skip_all, fields(method = %method, endpoint = path), level = "error")]
     async fn request<L: Serialize, T: DeserializeOwned>(
         &self,

@@ -81,6 +81,26 @@ must finish writing before handing files over; atomic rename into the watched
 directory is preferable. Event support varies by OS; manual `send` is safer.
 Neither command recursively scans directories.
 
+## Manual test upload
+
+`tests/fixtures/test-letter.typ` contains a synthetic one-page document addressed
+to the provider's published business address. It uses embedded fonts, no forms
+or encryption, and places the recipient safely inside the provider's window
+area rather than on its upper boundary. Compile and submit it explicitly:
+
+```sh
+nix shell nixpkgs#typst -c typst compile tests/fixtures/test-letter.typ /tmp/lxp-test.pdf
+lxp --mode test send /tmp/lxp-test.pdf
+lxp --mode test status JOB_ID
+lxp --mode test balance
+```
+
+Replace `JOB_ID` with the returned ID. Confirm `status` is `draft`, check the
+complete extracted recipient address, and verify the balance is unchanged.
+Do not manually release this synthetic document. `lxp --mode test cancel JOB_ID`
+removes the test job. Compiling the fixture does not call the service; submitting
+it does. Automated tests never upload this PDF.
+
 ## Local profiles and migration
 
 Environment credentials are preferred. If both variables are absent, the client

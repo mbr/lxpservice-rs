@@ -22,7 +22,7 @@ use crate::{
     lxpconfig::LxpConfig,
 };
 
-/// Runs the selected command without printing credentials or server bodies on failure.
+/// Runs the command without exposing credentials or error-response bodies.
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
