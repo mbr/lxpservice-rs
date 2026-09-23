@@ -4,3 +4,9 @@
 *.pdf
 deploy_local
 *.log
+/.direnv/
+/.env
+/.env.*
+!/.env.example
+/result
+/result-*

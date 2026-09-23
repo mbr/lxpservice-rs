@@ -154,14 +154,16 @@ deleted. You can also switch between them.
         .subcommand(
             SubCommand::with_name("watch-dir")
                 .about("Monitor a directory for letter orders")
-                .after_help("PDF files saved in the monitored directory are then automatically uploaded as 
-a uploaded as a letter job. The PDF files are moved to the sent subdirectory 
-after the transfer. The parameters used to print and send the jobs are defined 
+                .after_help(
+                    "PDF files saved in the monitored directory are then automatically uploaded as
+a letter job. The PDF files are moved to the sent subdirectory
+after the transfer. The parameters used to print and send the jobs are defined
 in the call.
 
-The profile definitions for access to the print service are expected under 
-/etc/lxp/lxp.toml. A log file is kept which is located in the monitored 
-directory.")
+The profile definitions for access to the print service are expected under
+/etc/lxp/lxp.toml. A log file is kept which is located in the monitored
+directory.",
+                )
                 .arg(
                     Arg::with_name("directory")
                         .required(true)

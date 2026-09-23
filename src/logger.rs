@@ -1,6 +1,7 @@
+use std::{io::Write, path::PathBuf};
+
 use chrono::offset::Local;
 use log::{debug, Level, LevelFilter, Metadata, Record};
-use std::{path::PathBuf, io::Write};
 
 struct AppLogger {
     max_level: LevelFilter,
@@ -14,7 +15,6 @@ impl log::Log for AppLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-
             // Write to log File
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -62,7 +62,7 @@ pub fn init(app_name: &str, log_dir: &PathBuf, log_level: u64) {
         Err(e) => {
             eprintln!("Couldn't initialize logger: {}", e);
             std::process::exit(1);
-        },
+        }
     }
 
     match level {

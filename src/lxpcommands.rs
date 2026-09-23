@@ -1,14 +1,10 @@
-use crate::lxpapi;
-use crate::lxpconfig;
-use crate::lxptypes;
-use log::{info, debug, trace, error};
-use std::fs;
-use std::io::prelude::*;
-use std::path::PathBuf;
+use std::{fs, io::prelude::*, path::PathBuf, sync::mpsc::channel, time::Duration};
+
 use futures::{stream, StreamExt};
-use notify::{Watcher, RecursiveMode, watcher};
-use std::sync::mpsc::channel;
-use std::time::Duration;
+use log::{debug, error, info, trace};
+use notify::{watcher, RecursiveMode, Watcher};
+
+use crate::{lxpapi, lxpconfig, lxptypes};
 
 #[derive(Debug, Clone)]
 pub struct LxpCommands {
@@ -19,7 +15,10 @@ pub struct LxpCommands {
 impl LxpCommands {
     pub fn new(config_dir: &PathBuf) -> LxpCommands {
         let config = lxpconfig::LxpConfig::new(config_dir);
-        LxpCommands { config, api_ref: None }
+        LxpCommands {
+            config,
+            api_ref: None,
+        }
     }
 
     fn api(&mut self) -> lxpapi::LxpApi {
@@ -28,8 +27,12 @@ impl LxpCommands {
             None => {
                 // Get profile and instanciate api
                 let profile = self.config.get_active_profile().unwrap();
-                self.api_ref = Some(lxpapi::LxpApi::new(&profile.user_name, &profile.api_key, &profile.url))
-            },
+                self.api_ref = Some(lxpapi::LxpApi::new(
+                    &profile.user_name,
+                    &profile.api_key,
+                    &profile.url,
+                ))
+            }
         };
         self.api_ref.clone().unwrap()
     }
@@ -258,7 +261,11 @@ impl LxpCommands {
         match std::fs::metadata(file_or_dir_name) {
             Ok(md) => {
                 if md.is_file() {
-                    match self.api().set_job(&file_or_dir_name, &color, &mode, &ship).await {
+                    match self
+                        .api()
+                        .set_job(&file_or_dir_name, &color, &mode, &ship)
+                        .await
+                    {
                         Ok(_r) => info!("  Job {} sent", &file_or_dir_name),
                         Err(_) => (), // Error message was already issued by set_job()
                     }
@@ -266,22 +273,22 @@ impl LxpCommands {
                 if md.is_dir() {
                     if let Ok(entries) = std::fs::read_dir(file_or_dir_name) {
                         let api = &self.api();
-                        let puts = stream::iter(
-                            entries.into_iter().map(|entry| {
-                                async move {
-                                    if let Ok(entry) = entry {
-                                        let path = entry.path();
-                                        if path.is_file() {
-                                            let p = path.to_str().unwrap();
-                                            match api.set_job(&p, &color, &mode, &ship).await {
-                                                Ok(_r) => info!("  Job {} sent", &p),
-                                                Err(_) => (), // Error message was already issued by set_job()
-                                            }
+                        let puts = stream::iter(entries.into_iter().map(|entry| {
+                            async move {
+                                if let Ok(entry) = entry {
+                                    let path = entry.path();
+                                    if path.is_file() {
+                                        let p = path.to_str().unwrap();
+                                        match api.set_job(&p, &color, &mode, &ship).await {
+                                            Ok(_r) => info!("  Job {} sent", &p),
+                                            Err(_) => (), // Error message was already issued by set_job()
                                         }
-                                    }                                
+                                    }
                                 }
-                            })
-                        ).buffer_unordered(5).collect::<Vec<()>>();  // up to 5 concurrent async requests
+                            }
+                        }))
+                        .buffer_unordered(5)
+                        .collect::<Vec<()>>(); // up to 5 concurrent async requests
                         puts.await;
                     }
                 }
@@ -307,40 +314,42 @@ impl LxpCommands {
 
         // Create a watcher object, delivering debounced events.
         let mut watcher = watcher(tx, Duration::from_secs(10)).unwrap();
-    
+
         // Add a path to be watched and monitored for changes.
         match watcher.watch(&dir_name, RecursiveMode::NonRecursive) {
             Ok(_) => (),
-            Err(e) => error!("Couldn't watch '{:#?}', error {}", &dir_name, e)
+            Err(e) => error!("Couldn't watch '{:#?}', error {}", &dir_name, e),
         };
-    
+
         loop {
             let pdf_path = match rx.recv() {
-                Ok(event) => {
-                    match event {
-                        notify::DebouncedEvent::Create(pb) => {
-                            match pb.extension() {
-                                Some(ext) => if ext.to_ascii_lowercase() == "pdf" {
-                                    Some(pb)
-                                } else {
-                                    None
-                                },
-                                None => None, 
+                Ok(event) => match event {
+                    notify::DebouncedEvent::Create(pb) => match pb.extension() {
+                        Some(ext) => {
+                            if ext.to_ascii_lowercase() == "pdf" {
+                                Some(pb)
+                            } else {
+                                None
                             }
-                        },
-                       _ => None,
-                    }
+                        }
+                        None => None,
+                    },
+                    _ => None,
                 },
                 Err(e) => {
                     trace!("watch error: {:?}", e);
                     None
-                },
+                }
             };
 
             match pdf_path {
                 Some(from_path) => {
                     // push pdf file to print service
-                    match self.api().set_job(from_path.to_str().unwrap(), &color, &mode, &ship).await {
+                    match self
+                        .api()
+                        .set_job(from_path.to_str().unwrap(), &color, &mode, &ship)
+                        .await
+                    {
                         Ok(_r) => info!("File {:#?} sent", &from_path),
                         Err(_) => (), // Error message was already issued by set_job()
                     }
@@ -352,7 +361,7 @@ impl LxpCommands {
                         Ok(_) => trace!("Move {:#?} to directory sent", &from_path),
                         Err(e) => error!("Could not move PDF file {}", e),
                     };
-                },
+                }
                 None => (),
             }
         }

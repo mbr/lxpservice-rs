@@ -1,13 +1,12 @@
 // Some notes on error handling in logger.rs Since this library is only used in the context
-// of the app lxp, errors are not returned but are handled directly in the sense of the app. 
+// of the app lxp, errors are not returned but are handled directly in the sense of the app.
 // This simplifies the interface design to the library.
 
+use std::{collections::HashMap, fs, path::PathBuf};
+
+use clap::crate_name;
 use log::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
-use clap::crate_name;
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Profile {
@@ -40,11 +39,9 @@ impl LxpConfig {
         let mut lxp_config = LxpConfig::default();
 
         let profiles = match fs::read_to_string(&config_path) {
-            Ok(s) => {
-                match toml::from_str::<Profiles>(&s) {
-                    Ok(profiles) => profiles,
-                    Err(_) => Profiles::default(),
-                }
+            Ok(s) => match toml::from_str::<Profiles>(&s) {
+                Ok(profiles) => profiles,
+                Err(_) => Profiles::default(),
             },
             Err(_) => Profiles::default(),
         };
@@ -56,10 +53,14 @@ impl LxpConfig {
 
     fn store(&self) {
         match toml::to_string_pretty(&self.profiles) {
-            Ok(toml_str) => 
+            Ok(toml_str) => {
                 if fs::write(&self.config_path, &toml_str).is_err() {
-                    error!("LxpConfig: Can't write config to file, path {:#?}", self.config_path);
-                },
+                    error!(
+                        "LxpConfig: Can't write config to file, path {:#?}",
+                        self.config_path
+                    );
+                }
+            }
             Err(_) => error!("LxpConfig: Can't serialize config"),
         }
     }
@@ -122,7 +123,7 @@ impl LxpConfig {
                 self.profiles.profile_active = Some(profile_name.into())
             }
             None => error!("Could not switch to profile '{}': not found", profile_name), // exits app
-        }        
+        }
         self.store()
     }
 

@@ -3,6 +3,9 @@ name = "lxp"
 version = "0.2.0"
 authors = ["simsys <winfried.simon@gmail.com>"]
 edition = "2018"
+description = "Command-line client for the LetterXpress print and mail service"
+license = "MIT"
+repository = "https://github.com/mbr/lxpservice-rs"
 
 [dependencies]
 clap = "~2.27"

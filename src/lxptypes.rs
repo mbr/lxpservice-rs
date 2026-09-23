@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 // Some Enums for lxpapi
 #[derive(Debug, Copy, Clone)]

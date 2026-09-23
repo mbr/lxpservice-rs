@@ -5,6 +5,19 @@ Letterxpress (https://www.letterxpress.de/) provides a service using a web API t
 
 The command line tool lxp makes it possible to use this web service with a command line tool. This tool is written in rust and therefore platform neutral, if it has only been tested under Linux so far.
 
+## Development
+
+The development environment uses the `github:mbr/flakes#rust` template.
+Run `direnv allow` to load the pinned Rust toolchain and native dependencies.
+Use `./check.sh` for checks and tests, `./format.sh` for formatting, and
+`nix build` to build the CLI at `result/bin/lxp`.
+
+Copy `.env.example` to `.env` and fill in your credentials locally. Direnv
+loads `.env` into the shell; `.env` and its variants are ignored by Git and
+must never be committed. The existing CLI still uses its legacy profile
+configuration: the `LXP_*` variables are reserved for the API v3 migration
+and are not yet consumed by the application.
+
 The possibilities of the tool are presented below.
 
 Getting help

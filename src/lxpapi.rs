@@ -17,11 +17,11 @@ extern crate md5;
 extern crate reqwest;
 extern crate serde_json;
 
-use crate::lxptypes::*;
+use std::{fmt, io::Read};
 
 use log::*;
-use std::fmt;
-use std::io::Read;
+
+use crate::lxptypes::*;
 
 #[derive(Debug, Clone)]
 pub struct LxpApi {
@@ -40,9 +40,11 @@ pub enum LxpApiError {
 impl fmt::Display for LxpApiError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            LxpApiError::PdfFileError => write!(f, "No PDF ile or file reading error"), 
+            LxpApiError::PdfFileError => write!(f, "No PDF ile or file reading error"),
             LxpApiError::RestError => write!(f, "Web service: check url, user and apikey"),
-            LxpApiError::JsonError => write!(f, "Internal JSON error, please inform the developers"),
+            LxpApiError::JsonError => {
+                write!(f, "Internal JSON error, please inform the developers")
+            }
         }
     }
 }
@@ -166,7 +168,7 @@ impl LxpApi {
             Err(why) => {
                 error!("couldn't open {}", why);
                 return Err(LxpApiError::PdfFileError);
-            },
+            }
             Ok(file) => file,
         };
         letter.address = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -176,7 +178,7 @@ impl LxpApi {
             Err(why) => {
                 error!("couldn't read {}", why);
                 return Err(LxpApiError::PdfFileError);
-            },
+            }
             Ok(_c) => (),
         };
 
@@ -219,8 +221,8 @@ impl LxpApi {
     }
 
     async fn handle_response(
-        &self, 
-        response: Result<reqwest::Response, reqwest::Error>
+        &self,
+        response: Result<reqwest::Response, reqwest::Error>,
     ) -> Result<Response, LxpApiError> {
         let r2 = match response {
             Ok(r) => {
