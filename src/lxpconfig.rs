@@ -2,7 +2,9 @@
 // of the app lxp, errors are not returned but are handled directly in the sense of the app.
 // This simplifies the interface design to the library.
 
-use std::{collections::HashMap, fs, path::PathBuf};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::{collections::HashMap, fs, io::Write, path::PathBuf};
 
 use clap::crate_name;
 use log::*;
@@ -41,7 +43,10 @@ impl LxpConfig {
         let profiles = match fs::read_to_string(&config_path) {
             Ok(s) => match toml::from_str::<Profiles>(&s) {
                 Ok(profiles) => profiles,
-                Err(_) => Profiles::default(),
+                Err(_) => {
+                    error!("Invalid profile configuration; refusing to overwrite it");
+                    return lxp_config;
+                }
             },
             Err(_) => Profiles::default(),
         };
@@ -54,7 +59,15 @@ impl LxpConfig {
     fn store(&self) {
         match toml::to_string_pretty(&self.profiles) {
             Ok(toml_str) => {
-                if fs::write(&self.config_path, &toml_str).is_err() {
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                #[cfg(unix)]
+                options.mode(0o600);
+                if options
+                    .open(&self.config_path)
+                    .and_then(|mut file| file.write_all(toml_str.as_bytes()))
+                    .is_err()
+                {
                     error!(
                         "LxpConfig: Can't write config to file, path {:#?}",
                         self.config_path
@@ -67,7 +80,7 @@ impl LxpConfig {
 
     pub fn get_active_profile(&self) -> Option<Profile> {
         match &self.profiles.profile_active {
-            Some(pa) => Some(self.profiles.profiles[pa].clone()),
+            Some(pa) => self.profiles.profiles.get(pa).cloned(),
             None => {
                 error!("LxpConfig: no active profile found");
                 None

@@ -62,7 +62,13 @@ impl LxpApi {
             username: user_name.into(),
             apikey: api_key.into(),
         };
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .expect("HTTP client configuration is valid");
         LxpApi {
             url: url.into(),
             auth: auth,
@@ -197,8 +203,6 @@ impl LxpApi {
     async fn delete(&self, sub_url: &str, body: &RequestLetter) -> Result<Response, LxpApiError> {
         let url = self.url.clone() + sub_url;
         trace!("Url {}", &url);
-        trace!("body {}", serde_json::to_string(body).unwrap());
-
         let response = self.client.delete(&url).json(body).send().await;
         self.handle_response(response).await
     }
@@ -206,8 +210,6 @@ impl LxpApi {
     async fn get(&self, sub_url: &str, body: &RequestLetter) -> Result<Response, LxpApiError> {
         let url = self.url.clone() + sub_url;
         trace!("Url {}", &url);
-        trace!("body {}", serde_json::to_string(body).unwrap());
-
         let response = self.client.get(&url).json(body).send().await;
         self.handle_response(response).await
     }
@@ -215,8 +217,6 @@ impl LxpApi {
     async fn post(&self, sub_url: &str, body: &RequestLetter) -> Result<Response, LxpApiError> {
         let url = self.url.clone() + sub_url;
         trace!("Url {}", &url);
-        trace!("body {}", serde_json::to_string(body).unwrap());
-
         let response = self.client.post(&url).json(body).send().await;
         self.handle_response(response).await
     }
@@ -236,6 +236,9 @@ impl LxpApi {
             }
         };
 
+        if !r2.status().is_success() {
+            return Err(LxpApiError::RestError);
+        }
         let json_res = match r2.text().await {
             Ok(r) => r,
             Err(e) => {
@@ -243,12 +246,10 @@ impl LxpApi {
                 return Err(LxpApiError::RestError);
             }
         };
-        trace!("Respond {}", &json_res);
-
         match serde_json::from_str::<Response>(&json_res) {
-            Ok(r) => return Ok(r),
+            Ok(r) if r.status == 200 => return Ok(r),
+            Ok(_) => return Err(LxpApiError::RestError),
             Err(e) => {
-                debug!("Respond was {}", &json_res);
                 debug!("Problem during JSON parsing: {}", e);
                 return Err(LxpApiError::JsonError);
             }
