@@ -10,6 +10,7 @@ mod lxptypes;
 use std::process::ExitCode;
 
 use clap::Parser;
+use sec::Secret;
 
 use crate::{
     clidef::{Cli, Command, ProfileCommand},
@@ -37,27 +38,30 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let log_dir = std::env::current_dir().map_err(Error::Io)?;
     logger::init("lxp", &log_dir, u64::from(cli.verbose));
     if let Command::Profile { command } = cli.command {
-        let mut config = LxpConfig::new(&config_dir);
+        let mut config = LxpConfig::load(&config_dir).map_err(Error::Config)?;
         match command {
-            ProfileCommand::List => config.show_profiles(),
+            ProfileCommand::List => config.list(),
             ProfileCommand::Save { name } => {
                 let (username, apikey) = credentials(cli.username, cli.api_key, None)?;
-                config.new_profile(
-                    &name,
-                    lxpconfig::Profile {
-                        user_name: username,
-                        api_key: apikey,
-                        url: "https://api.letterxpress.de/v3/".into(),
-                    },
-                );
+                config
+                    .save(
+                        name,
+                        lxpconfig::Profile {
+                            user_name: username,
+                            api_key: apikey,
+                        },
+                    )
+                    .map_err(Error::Config)?;
             }
-            ProfileCommand::Select { name } => config.switch_profile(&name),
-            ProfileCommand::Delete { name } => config.delete_profile(&name),
+            ProfileCommand::Select { name } => config.select(name).map_err(Error::Config)?,
+            ProfileCommand::Delete { name } => config.delete(&name).map_err(Error::Config)?,
         }
         return Ok(());
     }
     let profile = if cli.username.is_none() && cli.api_key.is_none() {
-        LxpConfig::new(&config_dir).get_active_profile()
+        LxpConfig::load(&config_dir)
+            .map_err(Error::Config)?
+            .active()
     } else {
         None
     };
@@ -69,15 +73,15 @@ async fn run(cli: Cli) -> Result<(), Error> {
 /// Resolves one complete credential source without mixing accounts.
 fn credentials(
     username: Option<String>,
-    apikey: Option<String>,
+    apikey: Option<Secret<String>>,
     profile: Option<lxpconfig::Profile>,
-) -> Result<(String, String), Error> {
+) -> Result<(String, Secret<String>), Error> {
     let pair = match (username, apikey, profile) {
         (Some(username), Some(apikey), _) => (username, apikey),
         (None, None, Some(profile)) => (profile.user_name, profile.api_key),
         _ => return Err(Error::Credentials),
     };
-    if pair.0.trim().is_empty() || pair.1.trim().is_empty() {
+    if pair.0.trim().is_empty() || pair.1.reveal().trim().is_empty() {
         return Err(Error::Credentials);
     }
     Ok(pair)

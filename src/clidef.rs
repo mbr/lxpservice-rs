@@ -6,6 +6,7 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand};
+use sec::Secret;
 
 use crate::lxptypes::{ApiMode, Color, JobFilter, Shipping, Sides, Specification};
 
@@ -21,7 +22,7 @@ pub struct Cli {
     pub username: Option<String>,
     /// Authenticates the account; prefer the environment over command-line arguments.
     #[arg(long, env = "LXP_API_KEY", global = true, hide_env_values = true)]
-    pub api_key: Option<String>,
+    pub api_key: Option<Secret<String>>,
     /// Chooses test shopping-cart uploads or paid live processing.
     #[arg(
         long,

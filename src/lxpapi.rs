@@ -3,6 +3,7 @@
 use std::{num::NonZeroU64, time::Duration};
 
 use reqwest::{Client, Method, StatusCode};
+use sec::Secret;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::lxptypes::{
@@ -20,7 +21,7 @@ pub struct LxpApi {
     /// Identifies the account.
     username: String,
     /// Authenticates requests.
-    apikey: String,
+    apikey: Secret<String>,
     /// Determines upload processing semantics.
     mode: ApiMode,
     /// Pools HTTPS connections without retries or redirects.
@@ -76,7 +77,7 @@ pub enum Error {
 
 impl LxpApi {
     /// Creates a client for the production service with explicit processing mode.
-    pub fn new(username: String, apikey: String, mode: ApiMode) -> Result<Self, Error> {
+    pub fn new(username: String, apikey: Secret<String>, mode: ApiMode) -> Result<Self, Error> {
         let client = client(true)?;
         Ok(Self {
             base_url: "https://api.letterxpress.de/v3".into(),
@@ -164,7 +165,7 @@ impl LxpApi {
         let body = Request {
             auth: Auth {
                 username: &self.username,
-                apikey: &self.apikey,
+                apikey: self.apikey.reveal(),
                 mode: self.mode,
             },
             letter,
@@ -251,7 +252,8 @@ mod tests {
     /// Blocks live uploads before any transport activity.
     #[tokio::test]
     async fn live_requires_confirmation() {
-        let api = LxpApi::new("dummy".into(), "dummy".into(), ApiMode::Live).expect("valid client");
+        let api = LxpApi::new("dummy".into(), "dummy".to_string().into(), ApiMode::Live)
+            .expect("valid client");
         let letter = Letter::from_pdf(
             b"%PDF-1.7",
             "test.pdf".into(),

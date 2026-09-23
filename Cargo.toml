@@ -22,8 +22,7 @@ notify = "8.2"
 dirs = "7.0"
 toml = "1.1"
 thiserror = "2.0"
-
-[dev-dependencies]
+sec = { version = "1.1", features = ["serialize", "deserialize"] }
 tempfile = "3.27"
 
 [profile.release]

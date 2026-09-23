@@ -22,6 +22,9 @@ use crate::{
 /// Describes command failures without relying on logging side effects.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Reports local profile failure.
+    #[error("{0}")]
+    Config(#[source] crate::lxpconfig::Error),
     /// Reports a service failure.
     #[error("{0}")]
     Api(#[source] lxpapi::Error),

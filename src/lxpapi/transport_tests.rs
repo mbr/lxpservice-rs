@@ -56,7 +56,7 @@ async fn server(response: String) -> (LxpApi, JoinHandle<(String, Value)>) {
     let api = LxpApi {
         base_url: format!("http://{address}/v3"),
         username: "dummy-user".into(),
-        apikey: "dummy-secret".into(),
+        apikey: "dummy-secret".to_string().into(),
         mode: ApiMode::Test,
         client: client(false).expect("test client"),
     };
