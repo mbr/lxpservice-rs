@@ -3,4 +3,4 @@ set -eu
 
 cd "$(dirname "$0")"
 
-cargo test
+cargo test --locked

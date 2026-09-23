@@ -2,10 +2,10 @@
 
 use std::{collections::HashSet, path::Path};
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use notify::{
-    event::{AccessKind, AccessMode, ModifyKind, RenameMode},
     EventKind, RecursiveMode, Watcher,
+    event::{AccessKind, AccessMode, ModifyKind, RenameMode},
 };
 use serde::Serialize;
 use tokio::{
@@ -16,7 +16,7 @@ use tokio::{
 use crate::{
     clidef::{Command, InvoiceCommand, Send},
     lxpapi::{self, LxpApi},
-    lxptypes::{DocumentError, Letter, PrintJob, Specification, MAX_PDF_BYTES},
+    lxptypes::{DocumentError, Letter, MAX_PDF_BYTES, PrintJob, Specification},
 };
 
 /// Describes command failures without relying on logging side effects.
@@ -140,6 +140,7 @@ async fn send_path(api: &LxpApi, send: &Send) -> Result<(), Error> {
 }
 
 /// Reads a bounded PDF and makes exactly one application-level upload attempt.
+#[tracing::instrument(skip_all, level = "error")]
 async fn send_one(api: &LxpApi, send: &Send, path: &Path) -> Result<PrintJob, Error> {
     if !is_pdf(path)
         || !tokio::fs::symlink_metadata(path)
@@ -167,7 +168,9 @@ async fn send_one(api: &LxpApi, send: &Send, path: &Path) -> Result<PrintJob, Er
         send.notice.clone(),
     )
     .map_err(Error::Document)?;
-    api.send(letter, send.yes).await.map_err(Error::Api)
+    let job = api.send(letter, send.yes).await.map_err(Error::Api)?;
+    tracing::info!(job_id = %job.id, status = %job.status, "submission confirmed");
+    Ok(job)
 }
 
 /// Checks the filename extension without assuming UTF-8 paths.

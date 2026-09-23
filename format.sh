@@ -1,10 +1,7 @@
 #!/bin/sh
-
-#: Formats the source.
-#: Uses --config to override rustfmt settings without a nightly toolchain.
-#: As a little hack, supports `--check`.
+set -eu
 
 cd "$(dirname "$0")"
 
-cargo fmt -- --config group_imports=StdExternalCrate --config imports_granularity=Crate "$@"
+cargo fmt -- "$@"
 nixfmt "$@" flake.nix

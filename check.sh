@@ -4,6 +4,6 @@ set -eu
 cd "$(dirname "$0")"
 
 ./format.sh --check
-# Keep upstream lint warnings non-fatal while bootstrapping the fork.
-cargo clippy --all-targets
+cargo clippy --locked --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
 ./test.sh

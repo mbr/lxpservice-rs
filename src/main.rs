@@ -1,5 +1,7 @@
 //! Runs explicit LetterXpress operations with nonzero failure exit codes.
 
+#![warn(missing_docs, rustdoc::broken_intra_doc_links)]
+
 mod clidef;
 mod logger;
 mod lxpapi;
@@ -23,20 +25,23 @@ use crate::{
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Err(error) = logger::init(cli.verbose) {
+        eprintln!("could not initialize diagnostics: {error}");
+        return ExitCode::FAILURE;
+    }
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error}");
+            tracing::warn!(error = %error, "operation failed");
             ExitCode::FAILURE
         }
     }
 }
 
 /// Resolves credentials and dispatches local or remote operations.
+#[tracing::instrument(skip_all, level = "error")]
 async fn run(cli: Cli) -> Result<(), Error> {
     let config_dir = dirs::config_dir().ok_or(Error::Credentials)?.join("lxp");
-    let log_dir = std::env::current_dir().map_err(Error::Io)?;
-    logger::init("lxp", &log_dir, u64::from(cli.verbose));
     if let Command::Profile { command } = cli.command {
         let mut config = LxpConfig::load(&config_dir).map_err(Error::Config)?;
         match command {

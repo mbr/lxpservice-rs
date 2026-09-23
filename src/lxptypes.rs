@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU64;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
@@ -278,7 +278,7 @@ pub struct Invoice {
 
 #[cfg(test)]
 mod tests {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
 
     use super::{ApiMode, Auth, DocumentError, Letter, Request, Specification};
 

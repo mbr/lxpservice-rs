@@ -9,7 +9,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::{client, Error, LxpApi};
+use super::{Error, LxpApi, client};
 use crate::lxptypes::{ApiMode, Letter, Specification};
 
 /// Serves a single synthetic HTTP exchange and captures the request.
@@ -65,7 +65,10 @@ async fn server(response: String) -> (LxpApi, JoinHandle<(String, Value)>) {
 
 /// Builds a synthetic response with a bounded connection lifetime.
 fn reply(status: &str, body: &str) -> String {
-    format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 /// Exercises authenticated GET, encoded POST and body-less DELETE over HTTP.
@@ -112,11 +115,12 @@ async fn transport_contract() {
     api.cancel(NonZeroU64::new(7).expect("positive id"))
         .await
         .expect("cancellation");
-    assert!(task
-        .await
-        .expect("server succeeds")
-        .0
-        .starts_with("DELETE /v3/printjobs/7 HTTP/1.1"));
+    assert!(
+        task.await
+            .expect("server succeeds")
+            .0
+            .starts_with("DELETE /v3/printjobs/7 HTTP/1.1")
+    );
 }
 
 /// Keeps rejected or undecodable uploads unconfirmed rather than retrying.

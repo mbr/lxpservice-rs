@@ -20,7 +20,12 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        buildToolchain = fenix.packages.${system}.stable.minimalToolchain;
+        buildToolchain = fenix.packages.${system}.stable.withComponents [
+          "cargo"
+          "clippy"
+          "rustc"
+          "rustfmt"
+        ];
         devToolchain = fenix.packages.${system}.stable.withComponents [
           "cargo"
           "clippy"
@@ -55,9 +60,29 @@
             description = cargoToml.package.description;
             nativeBuildInputs = with pkgs; [
               llvmPackages.bintools
+              nixfmt
             ];
 
-            src = pkgs.lib.cleanSource ./.;
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./src
+                ./Cargo.toml
+                ./Cargo.lock
+                ./README.md
+                ./LICENSE
+                ./check.sh
+                ./format.sh
+                ./test.sh
+                ./flake.nix
+              ];
+            };
+
+            checkPhase = ''
+              runHook preCheck
+              ./check.sh
+              runHook postCheck
+            '';
 
             cargoLock = {
               lockFile = ./Cargo.lock;
@@ -75,7 +100,7 @@
               devToolchain
               pkgs.nixfmt
             ];
-            RUST_LOG = "debug";
+            RUST_LOG = "info";
           }
         );
       }

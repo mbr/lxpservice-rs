@@ -4,7 +4,7 @@ use std::{num::NonZeroU64, time::Duration};
 
 use reqwest::{Client, Method, StatusCode};
 use sec::Secret;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::lxptypes::{
     ApiMode, Auth, Balance, Invoice, Invoices, JobFilter, Jobs, Letter, Price, PrintJob, Quote,
@@ -156,6 +156,7 @@ impl LxpApi {
     }
 
     /// Performs a single bounded request without logging request or response bodies.
+    #[tracing::instrument(skip_all, fields(method = %method, endpoint = path), level = "error")]
     async fn request<L: Serialize, T: DeserializeOwned>(
         &self,
         method: Method,
@@ -193,6 +194,7 @@ impl LxpApi {
             }
             bytes.extend_from_slice(&chunk);
         }
+        tracing::debug!(response_bytes = bytes.len(), "received API response");
         decode(&bytes)
     }
 }
@@ -226,7 +228,7 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<Option<T>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, Error, LxpApi};
+    use super::{Error, LxpApi, decode};
     use crate::lxptypes::{ApiMode, Balance, Letter, Specification};
 
     /// Handles success, service errors and body-less cancellation responses.
@@ -236,9 +238,11 @@ mod tests {
             .expect("valid envelope")
             .expect("balance data");
         assert_eq!(balance.balance, 5.0);
-        assert!(decode::<()>(br#"{"status":200,"message":"deleted"}"#)
-            .expect("valid cancellation")
-            .is_none());
+        assert!(
+            decode::<()>(br#"{"status":200,"message":"deleted"}"#)
+                .expect("valid cancellation")
+                .is_none()
+        );
         assert!(matches!(
             decode::<Balance>(br#"{"status":400,"message":"bad request"}"#),
             Err(Error::Api { status: 400 })
