@@ -8,19 +8,19 @@ license = "MIT"
 repository = "https://github.com/mbr/lxpservice-rs"
 
 [dependencies]
-clap = "2.27"
+clap = { version = "4.6", features = ["derive", "env", "cargo"] }
 chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = { version = "0.4", features = ["std"] }
-reqwest = { version = "0.10", features = ["json"] }
-tokio = { version = "0.2", features = ["full"] }
-base64 = "0.13"
-md5 = "0.7"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tokio = { version = "1.53", features = ["full"] }
+base64 = "0.23"
+md5 = "0.8"
 futures = "0.3"
-notify = "4.0"
-dirs = "4.0"
-toml = "0.5"
+notify = "8.2"
+dirs = "7.0"
+toml = "1.1"
 
 [profile.release]
 opt-level = 'z'  # Optimize for size.

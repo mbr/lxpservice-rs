@@ -19,7 +19,8 @@ extern crate serde_json;
 
 use std::{fmt, io::Read};
 
-use log::*;
+use base64::{engine::general_purpose::STANDARD, Engine};
+use log::{debug, error, trace};
 
 use crate::lxptypes::*;
 
@@ -115,7 +116,7 @@ impl LxpApi {
         match &r.invoice {
             Some(invoice) => {
                 let pdf_base64_data = invoice.pdf_data.clone().unwrap();
-                let pdf_data = base64::decode(pdf_base64_data).unwrap();
+                let pdf_data = STANDARD.decode(pdf_base64_data).unwrap();
                 return Ok((r, pdf_data));
             }
             None => return Ok((r, Vec::new())),
@@ -130,7 +131,7 @@ impl LxpApi {
         match &r.invoice {
             Some(invoice) => {
                 let pdf_base64_data = invoice.pdf_data.clone().unwrap();
-                let pdf_data = base64::decode(pdf_base64_data).unwrap();
+                let pdf_data = STANDARD.decode(pdf_base64_data).unwrap();
                 return Ok((r, pdf_data));
             }
             None => return Ok((r, Vec::new())),
@@ -182,7 +183,7 @@ impl LxpApi {
             Ok(_c) => (),
         };
 
-        letter.base64_file = base64::encode(pdf_content);
+        letter.base64_file = STANDARD.encode(pdf_content);
         letter.base64_checksum = format!("{:x}", md5::compute(&letter.base64_file));
 
         let body = RequestLetter {

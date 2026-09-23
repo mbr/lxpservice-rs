@@ -1,8 +1,8 @@
-use std::{fs, io::prelude::*, path::PathBuf, sync::mpsc::channel, time::Duration};
+use std::{fs, io::Write, path::PathBuf, sync::mpsc::channel};
 
 use futures::{stream, StreamExt};
 use log::{debug, error, info, trace};
-use notify::{watcher, RecursiveMode, Watcher};
+use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
 
 use crate::{lxpapi, lxpconfig, lxptypes};
 
@@ -313,7 +313,7 @@ impl LxpCommands {
         let (tx, rx) = channel();
 
         // Create a watcher object, delivering debounced events.
-        let mut watcher = watcher(tx, Duration::from_secs(10)).unwrap();
+        let mut watcher = recommended_watcher(tx).expect("filesystem watcher is available");
 
         // Add a path to be watched and monitored for changes.
         match watcher.watch(&dir_name, RecursiveMode::NonRecursive) {
@@ -323,19 +323,13 @@ impl LxpCommands {
 
         loop {
             let pdf_path = match rx.recv() {
-                Ok(event) => match event {
-                    notify::DebouncedEvent::Create(pb) => match pb.extension() {
-                        Some(ext) => {
-                            if ext.to_ascii_lowercase() == "pdf" {
-                                Some(pb)
-                            } else {
-                                None
-                            }
-                        }
-                        None => None,
-                    },
-                    _ => None,
-                },
+                Ok(Ok(event)) if matches!(event.kind, EventKind::Create(_)) => {
+                    event.paths.into_iter().find(|path| {
+                        path.extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+                    })
+                }
+                Ok(_) => None,
                 Err(e) => {
                     trace!("watch error: {:?}", e);
                     None

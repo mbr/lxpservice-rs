@@ -1,192 +1,145 @@
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
+//! Parses command-line operations.
 
-/// Define the command line interface
-pub fn cli_definition(app_name: &str, version: &str) -> ArgMatches<'static> {
-    App::new(app_name)
-        .version(version)
-        .author("Winfried Simon <winfried.simon@gmail.com>")
-        .about("Command line tool to manage LetterXpress print jobs")
-        .setting(AppSettings::ArgRequiredElseHelp)
-        // Define flag verbose
-        .arg(
-            Arg::with_name("verbose")
-                .short("v")
-                .long("verbose")
-                .multiple(true)
-                .help("Be communicative"),
-        )
-        // Define subcommand profile
-        .subcommand(
-            SubCommand::with_name("profile")
-                .about("Create and maintain profiles")
-                .after_help(
-                    "A profile has a name and contains all information for accessing the web
-service. With the subcommand profile they can be displayed, created and
-deleted. You can also switch between them. 
-",
-                )
-                .arg(
-                    Arg::with_name("new")
-                        .short("n")
-                        .long("new")
-                        .requires_all(&["profile", "user", "api_key"])
-                        .help("Create and select a new profile"),
-                )
-                .arg(
-                    Arg::with_name("delete")
-                        .short("d")
-                        .long("delete")
-                        .requires("profile")
-                        .help("Delete a single profile"),
-                )
-                .arg(
-                    Arg::with_name("delete_all")
-                        .short("a")
-                        .long("delete_all")
-                        .help("Delete all profiles"),
-                )
-                .arg(
-                    Arg::with_name("switch")
-                        .short("s")
-                        .long("switch")
-                        .requires("profile")
-                        .help("Switch to profile"),
-                )
-                .arg(
-                    Arg::with_name("overview")
-                        .short("o")
-                        .long("overview")
-                        .help("Show all profiles"),
-                )
-                .arg(Arg::with_name("profile").help("Name of user profile"))
-                .arg(Arg::with_name("user").help("User name of print service"))
-                .arg(Arg::with_name("url").help("Url to print service"))
-                .arg(Arg::with_name("api_key").help("Api key of print service")),
-        )
-        // Define subcommand invoice
-        .subcommand(
-            SubCommand::with_name("invoice")
-                .about("Handle invoices")
-                .after_help("List and get invoices.")
-                .arg(
-                    Arg::with_name("id")
-                        .short("i")
-                        .long("id")
-                        .takes_value(true)
-                        .help("Get invoice by id"),
-                )
-                .arg(
-                    Arg::with_name("current")
-                        .short("c")
-                        .long("current")
-                        .help("Get current (last) invoice"),
-                )
-                .arg(
-                    Arg::with_name("list")
-                        .short("l")
-                        .long("list")
-                        .help("Show list of available invoices"),
-                ),
-        )
-        // Define subcommand job
-        .subcommand(
-            SubCommand::with_name("job")
-                .about("Print job handling")
-                .after_help("Show and delete print jobs.")
-                .arg(
-                    Arg::with_name("delete")
-                        .short("d")
-                        .long("delete")
-                        .help("Delete print job on server"),
-                )
-                .arg(
-                    Arg::with_name("all")
-                        .short("a")
-                        .long("all")
-                        .requires("delete")
-                        .help("Delete all print jobs on server"),
-                )
-                .arg(
-                    Arg::with_name("id")
-                        .short("i")
-                        .long("id")
-                        .takes_value(true)
-                        .requires("delete")
-                        .help("Delete print job by id"),
-                )
-                .arg(
-                    Arg::with_name("overview")
-                        .short("o")
-                        .long("overview")
-                        .help("Show informations about jobs on remote server"),
-                ),
-        )
-        // Define subcommand set
-        .subcommand(
-            SubCommand::with_name("set")
-                .about("Set print job(s) on server")
-                .after_help("Set a single print job or many print jobs on server")
-                .arg(
-                    Arg::with_name("file_or_dir")
-                        .required(true)
-                        .help("PDF file or directory with PDF files"),
-                )
-                .arg(
-                    Arg::with_name("black_and_white")
-                        .short("b")
-                        .long("black_and_white")
-                        .help("Black and white print (default: color print)"),
-                )
-                .arg(
-                    Arg::with_name("international")
-                        .short("i")
-                        .long("international")
-                        .help("International destinations (default: national)"),
-                )
-                .arg(
-                    Arg::with_name("duplex")
-                        .short("d")
-                        .long("duplex")
-                        .help("Print on both sides (default: one side)"),
-                ),
-        )
-        // Define subcommand set
-        .subcommand(
-            SubCommand::with_name("watch-dir")
-                .about("Monitor a directory for letter orders")
-                .after_help(
-                    "PDF files saved in the monitored directory are then automatically uploaded as
-a letter job. The PDF files are moved to the sent subdirectory
-after the transfer. The parameters used to print and send the jobs are defined
-in the call.
+use std::path::PathBuf;
 
-The profile definitions for access to the print service are expected under
-/etc/lxp/lxp.toml. A log file is kept which is located in the monitored
-directory.",
-                )
-                .arg(
-                    Arg::with_name("directory")
-                        .required(true)
-                        .help("Supervised directory"),
-                )
-                .arg(
-                    Arg::with_name("black_and_white")
-                        .short("b")
-                        .long("black_and_white")
-                        .help("Black and white print (default: color print)"),
-                )
-                .arg(
-                    Arg::with_name("international")
-                        .short("i")
-                        .long("international")
-                        .help("International destinations (default: national)"),
-                )
-                .arg(
-                    Arg::with_name("duplex")
-                        .short("d")
-                        .long("duplex")
-                        .help("Print on both sides (default: one side)"),
-                ),
-        )
-        .get_matches()
+use clap::{Args, Parser, Subcommand};
+
+/// Selects a client operation.
+#[derive(Parser)]
+#[command(version, about)]
+pub struct Cli {
+    /// Increases diagnostic verbosity.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+    /// Chooses the operation to perform.
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// Defines supported client operations.
+#[derive(Subcommand)]
+pub enum Command {
+    /// Creates and maintains profiles.
+    Profile(Profile),
+    /// Retrieves invoices.
+    Invoice(Invoice),
+    /// Inspects or deletes print jobs.
+    Job(Job),
+    /// Submits PDF files.
+    Set(Send),
+    /// Watches a directory for PDF files.
+    WatchDir(Send),
+}
+
+/// Selects profile maintenance actions.
+#[derive(Args)]
+#[group(required = true, multiple = false, args = ["new", "delete", "delete_all", "switch", "overview"])]
+pub struct Profile {
+    /// Creates and selects a profile.
+    #[arg(short, long, requires_all = ["profile", "user", "url", "api_key"])]
+    pub new: bool,
+    /// Deletes a profile.
+    #[arg(short, long, requires = "profile")]
+    pub delete: bool,
+    /// Deletes every profile.
+    #[arg(short = 'a', long = "delete_all")]
+    pub delete_all: bool,
+    /// Selects a profile.
+    #[arg(short, long, requires = "profile")]
+    pub switch: bool,
+    /// Lists profiles.
+    #[arg(short, long)]
+    pub overview: bool,
+    /// Supplies positional profile data.
+    #[command(flatten)]
+    pub data: ProfileData,
+}
+
+/// Supplies profile connection information.
+#[derive(Args)]
+#[group(skip)]
+pub struct ProfileData {
+    /// Names the profile.
+    pub profile: Option<String>,
+    /// Identifies the account.
+    pub user: Option<String>,
+    /// Sets the service URL.
+    pub url: Option<String>,
+    /// Authenticates the account.
+    pub api_key: Option<String>,
+}
+
+/// Selects an invoice operation.
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+pub struct Invoice {
+    /// Retrieves an invoice by identifier.
+    #[arg(short, long)]
+    pub id: Option<i32>,
+    /// Retrieves the latest invoice.
+    #[arg(short, long)]
+    pub current: bool,
+    /// Lists invoices.
+    #[arg(short, long)]
+    pub list: bool,
+}
+
+/// Selects job operations.
+#[derive(Args)]
+pub struct Job {
+    /// Enables cancellation.
+    #[arg(short, long, requires = "selection", conflicts_with = "overview")]
+    pub delete: bool,
+    /// Cancels all pending jobs.
+    #[arg(short, long, requires = "delete", group = "selection")]
+    pub all: bool,
+    /// Cancels a single job.
+    #[arg(short, long, requires = "delete", group = "selection")]
+    pub id: Option<i32>,
+    /// Lists jobs.
+    #[arg(short, long, required_unless_present = "delete")]
+    pub overview: bool,
+}
+
+/// Selects documents and print options.
+#[derive(Args)]
+pub struct Send {
+    /// Locates the PDF file or directory.
+    pub path: PathBuf,
+    /// Prints in black and white.
+    #[arg(short, long = "black_and_white")]
+    pub black_and_white: bool,
+    /// Sends internationally.
+    #[arg(short, long)]
+    pub international: bool,
+    /// Prints on both sides.
+    #[arg(short, long)]
+    pub duplex: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::Cli;
+
+    /// Validates command constraints without running operations.
+    #[test]
+    fn command_constraints() {
+        Cli::command().debug_assert();
+        assert!(Cli::try_parse_from([
+            "lxp",
+            "profile",
+            "--new",
+            "home",
+            "user",
+            "https://example.com/",
+            "key"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["lxp", "profile", "--new", "home"]).is_err());
+        assert!(Cli::try_parse_from(["lxp", "job", "--delete"]).is_err());
+        assert!(Cli::try_parse_from(["lxp", "job", "--delete", "--all", "--id", "1"]).is_err());
+        assert!(Cli::try_parse_from(["lxp", "set", "letter.pdf", "--duplex"]).is_ok());
+    }
 }

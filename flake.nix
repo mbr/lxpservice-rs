@@ -44,7 +44,6 @@
             pkgs.lib.optionalString pkgs.stdenv.isLinux "-Clink-self-contained=-linker "
             # Avoid runtime references from embedded toolchain source paths.
             + "--remap-path-prefix=${buildToolchain}=/rustc";
-          OPENSSL_NO_VENDOR = "1";
         };
       in
       {
@@ -56,9 +55,7 @@
             description = cargoToml.package.description;
             nativeBuildInputs = with pkgs; [
               llvmPackages.bintools
-              pkg-config
             ];
-            buildInputs = [ pkgs.openssl ];
 
             src = pkgs.lib.cleanSource ./.;
 
