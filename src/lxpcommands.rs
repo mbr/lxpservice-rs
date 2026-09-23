@@ -1,7 +1,7 @@
 //! Executes explicit client operations and bounded document submissions.
 
 use std::{
-    collections::HashSet,
+    io::Write,
     num::NonZeroU64,
     path::{Path, PathBuf},
 };
@@ -69,11 +69,6 @@ pub enum Error {
     /// Reports filesystem watch failure.
     #[error("filesystem watcher failed")]
     Watch(#[source] notify::Error),
-    /// Avoids resubmitting a path after an earlier watcher attempt.
-    #[error(
-        "path has already been submitted in this watcher session; inspect jobs before restarting"
-    )]
-    RepeatedPath,
 }
 
 /// Runs a parsed API operation and prints structured results to stdout.
@@ -91,8 +86,7 @@ pub async fn run(api: &LxpApi, command: Command, state_dir: Option<PathBuf>) -> 
         Command::Status { id } => output(&api.job(id).await.map_err(Error::Api)?),
         Command::Cancel { id } => {
             api.cancel(id).await.map_err(Error::Api)?;
-            println!("Canceled job {id}");
-            Ok(())
+            writeln!(std::io::stdout().lock(), "Canceled job {id}").map_err(Error::Io)
         }
         Command::Send(send) => {
             api.authorize_send(send.yes).map_err(Error::Api)?;
@@ -137,11 +131,9 @@ fn state_directory(directory: Option<PathBuf>) -> Result<PathBuf, Error> {
 
 /// Prints a typed response without using diagnostics as the data channel.
 fn output<T: Serialize>(value: &T) -> Result<(), Error> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).map_err(Error::Json)?
-    );
-    Ok(())
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer_pretty(&mut stdout, value).map_err(Error::Json)?;
+    writeln!(stdout).map_err(Error::Io)
 }
 
 /// Submits directory entries sequentially and stops on the first unconfirmed job.
@@ -234,6 +226,21 @@ fn is_pdf(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
+/// Claims a completed input before awaiting the network, retaining it on failure.
+async fn claim_document(path: &Path, directory: &Path) -> Result<PathBuf, Error> {
+    let filename = path.file_name().ok_or(Error::InvalidPath)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".lxp-pending-")
+        .tempdir_in(directory)
+        .map_err(Error::Io)?
+        .keep();
+    let destination = staging.join(filename);
+    tokio::fs::rename(path, &destination)
+        .await
+        .map_err(Error::Io)?;
+    Ok(destination)
+}
+
 /// Watches completed writes and archives only confirmed submissions.
 async fn watch(api: &LxpApi, send: &Send, state_dir: &Path) -> Result<(), Error> {
     tokio::fs::create_dir_all(send.path.join("sent"))
@@ -247,7 +254,6 @@ async fn watch(api: &LxpApi, send: &Send, state_dir: &Path) -> Result<(), Error>
     watcher
         .watch(&send.path, RecursiveMode::NonRecursive)
         .map_err(Error::Watch)?;
-    let mut attempted = HashSet::new();
     while let Some(event) = rx.recv().await {
         let event = event.map_err(Error::Watch)?;
         if !matches!(
@@ -261,18 +267,48 @@ async fn watch(api: &LxpApi, send: &Send, state_dir: &Path) -> Result<(), Error>
             if !is_pdf(&path) || !path.exists() {
                 continue;
             }
-            if !attempted.insert(path.clone()) {
-                return Err(Error::RepeatedPath);
-            }
-            let job = send_one(api, send, &path, state_dir).await?;
+            let staged = claim_document(&path, &send.path).await?;
+            let job = send_one(api, send, &staged, state_dir).await?;
             output(&job)?;
-            let filename = path.file_name().ok_or(Error::InvalidPath)?;
+            let filename = staged.file_name().ok_or(Error::InvalidPath)?;
             let destination = send.path.join("sent").join(filename);
-            tokio::fs::hard_link(&path, destination)
+            tokio::fs::hard_link(&staged, destination)
                 .await
                 .map_err(Error::Io)?;
-            tokio::fs::remove_file(path).await.map_err(Error::Io)?;
+            tokio::fs::remove_file(&staged).await.map_err(Error::Io)?;
+            if let Some(directory) = staged.parent() {
+                tokio::fs::remove_dir(directory).await.map_err(Error::Io)?;
+            }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claim_document;
+
+    /// Preserves the claimed document when its original filename is reused.
+    #[tokio::test]
+    async fn claim_isolates_reused_paths() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let original = directory.path().join("letter.pdf");
+        tokio::fs::write(&original, b"first PDF")
+            .await
+            .expect("write fixture");
+        let staged = claim_document(&original, directory.path())
+            .await
+            .expect("claim fixture");
+        tokio::fs::write(&original, b"second PDF")
+            .await
+            .expect("reuse filename");
+        assert_eq!(
+            tokio::fs::read(staged).await.expect("read staged file"),
+            b"first PDF"
+        );
+        assert_eq!(
+            tokio::fs::read(original).await.expect("read new file"),
+            b"second PDF"
+        );
+    }
 }

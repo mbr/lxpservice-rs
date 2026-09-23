@@ -122,11 +122,7 @@ impl LxpApi {
     pub async fn jobs(&self, filter: Option<JobFilter>, page: u32) -> Result<Jobs, Error> {
         let mut path = format!("printjobs?page={page}");
         if let Some(filter) = filter {
-            let value = serde_json::to_value(filter).map_err(|source| Error::Json { source })?;
-            if let Some(filter) = value.as_str() {
-                path.push_str("&filter=");
-                path.push_str(filter);
-            }
+            path.push_str(&format!("&filter={filter}"));
         }
         self.get(&path).await
     }
@@ -195,6 +191,7 @@ impl LxpApi {
             .await
             .map_err(|source| Error::Transport { source })?;
         if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "API rejected request");
             return Err(Error::Http {
                 status: response.status(),
             });
@@ -235,6 +232,7 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<Option<T>, Error> {
     let response: Response<T> =
         serde_json::from_slice(bytes).map_err(|source| Error::Json { source })?;
     if !(200..300).contains(&response.status) {
+        tracing::warn!(status = response.status, "service rejected request");
         return Err(Error::Api {
             status: response.status,
         });

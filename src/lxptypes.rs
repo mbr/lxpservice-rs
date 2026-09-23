@@ -1,6 +1,6 @@
 //! Models LetterXpress requests and responses independently of transport.
 
-use std::num::NonZeroU64;
+use std::{fmt, num::NonZeroU64};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use clap::ValueEnum;
@@ -68,6 +68,19 @@ pub enum JobFilter {
     Canceled,
     /// Selects shopping-cart jobs.
     Draft,
+}
+
+impl fmt::Display for JobFilter {
+    /// Formats the provider's query-string filter name.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Queue => "queue",
+            Self::Hold => "hold",
+            Self::Done => "done",
+            Self::Canceled => "canceled",
+            Self::Draft => "draft",
+        })
+    }
 }
 
 /// Carries authentication for a single request.

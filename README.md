@@ -74,9 +74,12 @@ provider-side duplicates. Keep the receipt directory across invocations and do
 not bypass it to retry a timeout. Different machines do not share local receipts.
 
 A directory passed to `send` submits its PDFs sequentially and stops on failure.
-`watch-dir DIRECTORY` watches completed writes/renames, archives confirmed files
-under `sent`, and stops on errors or repeated paths. Event support varies by OS;
-manual `send` is preferable. Neither command recursively scans directories.
+`watch-dir DIRECTORY` watches completed writes/renames, claims inputs in private
+`.lxp-pending-*` directories, and archives confirmed files under `sent`. Errors
+stop the watcher and leave claimed inputs for manual reconciliation. Producers
+must finish writing before handing files over; atomic rename into the watched
+directory is preferable. Event support varies by OS; manual `send` is safer.
+Neither command recursively scans directories.
 
 ## Local profiles and migration
 

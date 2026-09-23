@@ -125,15 +125,17 @@ impl LxpConfig {
     }
 
     /// Lists names and selection state without exposing authentication material.
-    pub fn list(&self) {
+    pub fn list(&self) -> Result<(), Error> {
+        let mut stdout = std::io::stdout().lock();
         for name in self.profiles.profiles.keys() {
             let marker = if self.profiles.profile_active.as_ref() == Some(name) {
                 "*"
             } else {
                 " "
             };
-            println!("{marker} {name}");
+            writeln!(stdout, "{marker} {name}").map_err(Error::Io)?;
         }
+        Ok(())
     }
 
     /// Atomically replaces the store with owner-only permissions on Unix.

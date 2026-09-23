@@ -46,7 +46,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
     if let Command::Profile { command } = cli.command {
         let mut config = LxpConfig::load(&config_dir).map_err(Error::Config)?;
         match command {
-            ProfileCommand::List => config.list(),
+            ProfileCommand::List => config.list().map_err(Error::Config)?,
             ProfileCommand::Save { name } => {
                 let (username, apikey) = credentials(cli.username, cli.api_key, None)?;
                 config
