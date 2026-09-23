@@ -76,6 +76,38 @@ async fn main() {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::print_options;
+    use crate::{
+        clidef::Send,
+        lxptypes::{Mode, Ship},
+    };
+
+    /// Keeps duplex and international flags independent.
+    #[test]
+    fn independent_print_flags() {
+        let mut send = Send {
+            path: PathBuf::from("test.pdf"),
+            black_and_white: true,
+            international: false,
+            duplex: true,
+        };
+        assert!(matches!(
+            print_options(&send),
+            (_, Mode::Duplex, Ship::National)
+        ));
+        send.duplex = false;
+        send.international = true;
+        assert!(matches!(
+            print_options(&send),
+            (_, Mode::Simplex, Ship::International)
+        ));
+    }
+}
+
 /// Converts print flags into API options.
 fn print_options(send: &clidef::Send) -> (lxptypes::ColorPrint, lxptypes::Mode, lxptypes::Ship) {
     (

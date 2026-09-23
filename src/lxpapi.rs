@@ -121,8 +121,10 @@ impl LxpApi {
         let r: Response = self.get("getInvoice", &body).await?;
         match &r.invoice {
             Some(invoice) => {
-                let pdf_base64_data = invoice.pdf_data.clone().unwrap();
-                let pdf_data = STANDARD.decode(pdf_base64_data).unwrap();
+                let pdf_base64_data = invoice.pdf_data.as_ref().ok_or(LxpApiError::JsonError)?;
+                let pdf_data = STANDARD
+                    .decode(pdf_base64_data)
+                    .map_err(|_| LxpApiError::JsonError)?;
                 return Ok((r, pdf_data));
             }
             None => return Ok((r, Vec::new())),
@@ -136,8 +138,10 @@ impl LxpApi {
         let r: Response = self.get(&sub_url, &body).await?;
         match &r.invoice {
             Some(invoice) => {
-                let pdf_base64_data = invoice.pdf_data.clone().unwrap();
-                let pdf_data = STANDARD.decode(pdf_base64_data).unwrap();
+                let pdf_base64_data = invoice.pdf_data.as_ref().ok_or(LxpApiError::JsonError)?;
+                let pdf_data = STANDARD
+                    .decode(pdf_base64_data)
+                    .map_err(|_| LxpApiError::JsonError)?;
                 return Ok((r, pdf_data));
             }
             None => return Ok((r, Vec::new())),
@@ -171,17 +175,21 @@ impl LxpApi {
         };
 
         let path = std::path::Path::new(&file_name);
-        let mut pdf_file = match std::fs::File::open(&path) {
+        let pdf_file = match std::fs::File::open(&path) {
             Err(why) => {
                 error!("couldn't open {}", why);
                 return Err(LxpApiError::PdfFileError);
             }
             Ok(file) => file,
         };
-        letter.address = path.file_name().unwrap().to_str().unwrap().to_string();
+        letter.address = path
+            .file_name()
+            .ok_or(LxpApiError::PdfFileError)?
+            .to_string_lossy()
+            .into_owned();
 
         let mut pdf_content = Vec::new();
-        match pdf_file.read_to_end(&mut pdf_content) {
+        match pdf_file.take(35_000_001).read_to_end(&mut pdf_content) {
             Err(why) => {
                 error!("couldn't read {}", why);
                 return Err(LxpApiError::PdfFileError);
@@ -189,6 +197,9 @@ impl LxpApi {
             Ok(_c) => (),
         };
 
+        if pdf_content.len() > 35_000_000 || !pdf_content.starts_with(b"%PDF-") {
+            return Err(LxpApiError::PdfFileError);
+        }
         letter.base64_file = STANDARD.encode(pdf_content);
         letter.base64_checksum = format!("{:x}", md5::compute(&letter.base64_file));
 

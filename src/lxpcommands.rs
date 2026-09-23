@@ -1,8 +1,12 @@
-use std::{fs, io::Write, path::PathBuf, sync::mpsc::channel};
+use std::{fs, io::Write, path::PathBuf};
 
 use futures::{stream, StreamExt};
 use log::{debug, error, info, trace};
-use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
+use notify::{
+    event::{AccessKind, AccessMode, ModifyKind, RenameMode},
+    recommended_watcher, EventKind, RecursiveMode, Watcher,
+};
+use tokio::sync::mpsc::unbounded_channel;
 
 use crate::{lxpapi, lxpconfig, lxptypes};
 
@@ -310,10 +314,15 @@ impl LxpCommands {
             Err(e) => error!("Could not create watch_dir {:#?}, error {}", &watch_dir, e),
         }
 
-        let (tx, rx) = channel();
-
-        // Create a watcher object, delivering debounced events.
-        let mut watcher = recommended_watcher(tx).expect("filesystem watcher is available");
+        if fs::create_dir_all(watch_dir.join("sent")).is_err() {
+            error!("Could not create sent directory");
+            return;
+        }
+        let (tx, mut rx) = unbounded_channel();
+        let mut watcher = recommended_watcher(move |event| {
+            let _ = tx.send(event);
+        })
+        .expect("filesystem watcher is available");
 
         // Add a path to be watched and monitored for changes.
         match watcher.watch(&dir_name, RecursiveMode::NonRecursive) {
@@ -322,18 +331,25 @@ impl LxpCommands {
         };
 
         loop {
-            let pdf_path = match rx.recv() {
-                Ok(Ok(event)) if matches!(event.kind, EventKind::Create(_)) => {
+            let pdf_path = match rx.recv().await {
+                Some(Ok(event))
+                    if matches!(
+                        event.kind,
+                        EventKind::Access(AccessKind::Close(AccessMode::Write))
+                            | EventKind::Modify(ModifyKind::Name(RenameMode::To))
+                    ) =>
+                {
                     event.paths.into_iter().find(|path| {
                         path.extension()
                             .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
                     })
                 }
-                Ok(_) => None,
-                Err(e) => {
-                    trace!("watch error: {:?}", e);
-                    None
+                Some(Ok(_)) => None,
+                Some(Err(e)) => {
+                    error!("Filesystem watch failed: {}", e);
+                    return;
                 }
+                None => return,
             };
 
             match pdf_path {
@@ -345,7 +361,13 @@ impl LxpCommands {
                         .await
                     {
                         Ok(_r) => info!("File {:#?} sent", &from_path),
-                        Err(_) => (), // Error message was already issued by set_job()
+                        Err(error) => {
+                            error!(
+                                "Upload was not confirmed: {}; refusing to archive or retry",
+                                error
+                            );
+                            return;
+                        }
                     }
 
                     // move pdf filt to sent directory
